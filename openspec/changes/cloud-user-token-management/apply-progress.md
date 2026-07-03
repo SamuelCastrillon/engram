@@ -478,3 +478,295 @@ Exact unchecked task lines remaining in `tasks.md` after PR3A:
 - PR3A intentionally does not wire dashboard sessions, bootstrap, CLI, or dashboard UX. Those remain the next PR3/PR4/PR5 slices.
 - Runtime serving still needs dedicated managed-token pepper/config wiring before token creation can be enabled outside explicit `WithManagedTokenHasher` construction.
 - The PR3A admin audit implementation avoids false success audit records by auditing after successful mutations, but it does not make audit+mutation a single database transaction; if audit insertion fails after mutation, the API returns `500` after state changed. A later hardening slice can add transactional composite store methods if needed.
+
+---
+
+## PR3B1 apply update — dashboard managed-principal sessions
+
+### Current branch
+
+`feat/cloud-user-token-management-dashboard-session-bootstrap`
+
+### Chain context
+
+- Tracker branch: `feat/cloud-user-token-management`
+- Parent branch for this feature-branch-chain slice: `feat/cloud-user-token-management-admin-bootstrap`
+- Current slice: bounded PR3B1 from PR 3 — dashboard managed-principal login/session revalidation only.
+- Prior committed PR3A slice: `7172b95 feat(cloud): add managed admin API handlers`
+- Out of scope for PR3B1: first-admin dashboard bootstrap, last-admin recovery UX, admin user/token/grant dashboard screens, CLI bootstrap, and docs.
+
+### Structured status consumed / produced before apply
+
+```yaml
+schemaName: spec-driven
+changeName: cloud-user-token-management
+artifactStore: openspec
+changeRoot: openspec/changes/cloud-user-token-management
+applyState: ready
+actionContext:
+  mode: repo-local
+  workspaceRoot: /Users/alanbuscaglia/work/engram
+  allowedEditRoots: [/Users/alanbuscaglia/work/engram]
+  warnings: []
+strictTDD: true
+testRunner: go test ./...
+nextRecommended: continue PR3 bootstrap/audit slice or run sdd-verify on PR3B1
+```
+
+### Review workload / PR boundary
+
+- `tasks.md` forecast has `400-line budget risk: High` and `Chained PRs recommended: Yes`.
+- Parent provided a resolved bounded delivery path: feature-branch-chain PR3B1, implementation limited to dashboard managed-principal login/session revalidation.
+- This slice stayed inside `internal/cloud/cloudserver/` plus OpenSpec progress/task updates.
+
+### Completed in PR3B1
+
+- Added RED dashboard session tests in `internal/cloud/cloudserver/dashboard_session_test.go` proving:
+  - managed admin login succeeds and returns a signed dashboard session cookie instead of raw token material;
+  - cookie attributes are `HttpOnly`, `SameSite=Lax`, and `Secure` when the login request is HTTPS;
+  - protected dashboard requests revalidate managed principal state from storage;
+  - managed members keep dashboard access but receive `403` for admin dashboard behavior;
+  - disabled managed users are redirected to login on the next protected request;
+  - demoted managed admins lose admin access on the next protected request.
+- Added GREEN dashboard session support in `internal/cloud/cloudserver/dashboard_session.go` and `cloudserver.go`:
+  - managed login resolves bearer tokens through the principal resolver;
+  - dashboard cookies carry signed principal claims, not the raw bearer token;
+  - every protected request revalidates enabled state and role from the principal state store;
+  - request context is populated with the revalidated principal for dashboard admin/display-name checks;
+  - legacy dashboard token fallback remains compatible through the existing dashboard session codec path.
+
+### Persisted task checkbox updates
+
+The following task lines are now visibly checked in `openspec/changes/cloud-user-token-management/tasks.md`:
+
+- [x] RED: Add dashboard-session tests proving managed admin login succeeds, member admin access fails, disabled/demoted users lose access on the next protected request, and secure cookie attributes are set correctly.
+- [x] GREEN: Update dashboard auth/session handling in `internal/cloud/cloudserver` and `internal/cloud/dashboard` so signed cookies carry principal claims but every protected request revalidates enabled state and role from storage.
+- [x] Dashboard cookies are `HttpOnly`, `SameSite=Lax` or stronger, and `Secure` under HTTPS/production rules.
+
+### TDD Cycle Evidence
+
+| Task | Test File | Layer | Safety Net | RED | GREEN | TRIANGULATE | REFACTOR |
+|------|-----------|-------|------------|-----|-------|-------------|----------|
+| PR3B1 dashboard managed sessions | `internal/cloud/cloudserver/dashboard_session_test.go` | Handler integration with fake principal state store | ⚠️ No clean pre-edit safety-net run was captured; focused RED was run before production edits and final package/full suite passed | ✅ `go test ./internal/cloud/cloudserver -run 'TestManagedDashboard'` failed at RED because `WithPrincipalStateStore` and managed session helpers did not exist | ✅ `go test ./internal/cloud/cloudserver` passed after adding signed principal sessions and revalidation | ✅ Covered admin/member/disabled/demoted cases plus secure cookie attributes and raw-token exclusion | ✅ Session signing/revalidation moved into `dashboard_session.go`; dashboard route wiring remains in `cloudserver.go` |
+
+### Verification run
+
+```bash
+go test ./internal/cloud/cloudserver
+go test ./...
+git diff --check
+```
+
+Results:
+
+- `go test ./internal/cloud/cloudserver`: PASS.
+- `go test ./...`: PASS.
+- `git diff --check`: PASS.
+
+### Files changed
+
+- `internal/cloud/cloudserver/cloudserver.go`
+- `internal/cloud/cloudserver/dashboard_session.go`
+- `internal/cloud/cloudserver/dashboard_session_test.go`
+- `openspec/changes/cloud-user-token-management/tasks.md`
+- `openspec/changes/cloud-user-token-management/apply-progress.md`
+
+### Remaining tasks
+
+Exact unchecked task lines remaining in `tasks.md` after PR3B1:
+
+```markdown
+- [ ] RED: Add bootstrap tests for legacy dashboard/admin credential creating the first managed admin, rejecting duplicate first-admin bootstrap, and preventing accidental removal of the last usable managed admin path.
+- [ ] GREEN: Implement dashboard bootstrap route/handler and last-admin protections, treating `ENGRAM_CLOUD_ADMIN` as explicit bootstrap/recovery access after managed admins exist.
+- [ ] RED: Add audit tests for token create/revoke, user create/enable/disable, grant create/revoke, admin login, dashboard bootstrap, accepted/rejected legacy recovery actions, and redaction of raw tokens.
+- [ ] GREEN: Emit synchronous `cloud_auth_audit_log` events for admin/security mutations; fail authoritative admin mutations if audit insertion fails.
+- [ ] Verify: targeted admin/dashboard/bootstrap tests and `go test ./...`.
+- [ ] Rollback boundary: remove admin/bootstrap routes while retaining storage/auth foundation and legacy auth behavior.
+- [ ] RED: Add dashboard rendering/handler tests for `/dashboard/admin/users`, `/dashboard/admin/users/list`, token partials, grant partials, and contributor/managed-user separation.
+- [ ] GREEN: Update `internal/cloud/dashboard/dashboard.go` and related templ/templates/assets to show `Managed Users` separately from contributor analytics.
+- [ ] GREEN: Add server-rendered forms and HTMX-compatible partials for user create, enable/disable, token create/show-once, token revoke, grant create, and grant revoke.
+- [ ] TRIANGULATE: Test non-HTMX form POST/redirect behavior and HTMX partial responses; partials must be meaningful HTML without hidden client-side policy logic.
+- [ ] TRIANGULATE: Test empty states explaining deny-by-default project grants and token show-once warnings.
+- [ ] REFACTOR: Keep policy checks in server/auth/store layers; dashboard code must render outcomes, not make authorization decisions.
+- [ ] Verify: dashboard package tests plus `go test ./...`.
+- [ ] Rollback boundary: remove dashboard UI routes/templates without affecting already-tested admin handlers.
+- [ ] RED: Add CLI tests in `cmd/engram/` for `engram cloud bootstrap admin --username ...`, duplicate bootstrap refusal, optional token issuance printed once, optional project grants, invalid input, and audit event creation.
+- [ ] GREEN: Implement `engram cloud bootstrap admin` in `cmd/engram/cloud.go`, using cloud runtime DB configuration by default and an existing DSN override convention only if already present.
+- [ ] TRIANGULATE: Test that raw managed tokens are never persisted, logged, audited, rendered in token metadata lists, or printed except the creation/bootstrap response.
+- [ ] GREEN: Update docs discovery targets affected by cloud setup and sync auth, starting with `README.md`, `docs/`, `CONTRIBUTING.md`, and any cloud deployment docs found by `rg "ENGRAM_CLOUD_TOKEN|ENGRAM_CLOUD_ADMIN|ENGRAM_CLOUD_ALLOWED_PROJECTS|cloud bootstrap"`.
+- [ ] GREEN: Document managed users/tokens, dedicated token pepper, first-admin dashboard bootstrap, CLI bootstrap, project grants, deny-by-default managed principals, legacy env-token migration, and rollback to legacy sync credentials.
+- [ ] RED: Add regression tests that `/sync/*` route methods, paths, request schemas, and response schemas remain unchanged for existing clients.
+- [ ] GREEN: Fix any contract drift found by regression tests without changing MVP payloads.
+- [ ] REFACTOR: Run `gofmt` on touched Go files and remove any temporary test seams not needed by production behavior.
+- [ ] Verify: `go test ./...`, targeted cloud tests (`go test ./internal/cloud/... ./cmd/engram`), and `go test -cover ./...`.
+- [ ] Rollback boundary: revert CLI/docs/audit hardening slice while keeping prior reviewed server behavior intact.
+- [ ] Managed human users are distinct from contributor analytics.
+- [ ] Managed tokens authenticate principals; authorization uses principal role and project grants.
+- [ ] Token hashes use a dedicated cloud token pepper, not the dashboard/session signing secret.
+- [ ] Raw token values are shown once and never stored or audited.
+- [ ] Disabled users, revoked tokens, and revoked grants stop future access immediately.
+- [ ] Legacy `ENGRAM_CLOUD_TOKEN`, `ENGRAM_CLOUD_ADMIN`, and `ENGRAM_CLOUD_ALLOWED_PROJECTS` behavior remains compatible during migration.
+- [ ] Managed principals are deny-by-default for project sync.
+- [ ] CLI and dashboard can create the first managed admin safely.
+- [ ] Audit events cover all required MVP identity/security actions without secret leakage.
+- [ ] Documentation matches real routes, commands, environment variables, and rollback behavior.
+```
+
+### Risks / follow-ups
+
+- Dashboard first-admin bootstrap route/handler and recovery behavior remain unchecked and out of scope for PR3B1.
+- Admin login/bootstrap/recovery audit coverage remains unchecked.
+- PR4 managed-user dashboard UX and PR5 CLI/docs remain out of scope for this slice.
+- I removed an out-of-scope, pre-existing partial bootstrap test/handler attempt encountered during RED recovery and kept this diff limited to session handling.
+
+---
+
+## PR3B apply update — dashboard sessions plus first-admin dashboard bootstrap
+
+### Current branch
+
+`feat/cloud-user-token-management-dashboard-session-bootstrap`
+
+### Structured status consumed / produced before apply
+
+```yaml
+schemaName: spec-driven
+changeName: cloud-user-token-management
+artifactStore: openspec
+planningHome:
+  root: /Users/alanbuscaglia/work/engram/openspec
+  changesDir: /Users/alanbuscaglia/work/engram/openspec/changes
+changeRoot: /Users/alanbuscaglia/work/engram/openspec/changes/cloud-user-token-management
+artifactPaths:
+  proposal: [openspec/changes/cloud-user-token-management/proposal.md]
+  specs: [openspec/changes/cloud-user-token-management/spec.md]
+  design: [openspec/changes/cloud-user-token-management/design.md]
+  tasks: [openspec/changes/cloud-user-token-management/tasks.md]
+  applyProgress: [openspec/changes/cloud-user-token-management/apply-progress.md]
+artifacts:
+  proposal: done
+  specs: done
+  design: done
+  tasks: done
+  applyProgress: done
+applyState: ready
+dependencies:
+  apply: ready
+  verify: ready
+  sync: blocked
+  archive: blocked
+actionContext:
+  mode: repo-local
+  workspaceRoot: /Users/alanbuscaglia/work/engram
+  allowedEditRoots: [/Users/alanbuscaglia/work/engram]
+  warnings: []
+strictTDD: true
+testRunner: go test ./...
+nextRecommended: continue PR3 audit hardening or run sdd-verify on bounded PR3B session/bootstrap slice
+isNonAuthoritative: false
+```
+
+### Review workload / PR boundary
+
+- `tasks.md` forecast has `400-line budget risk: High` and `Chained PRs recommended: Yes`.
+- Parent provided a resolved bounded delivery path: feature-branch-chain PR3B, limited to dashboard session/auth revalidation plus first-admin dashboard bootstrap.
+- This slice did not implement PR4 managed-user dashboard UX screens/forms and did not implement PR5 CLI/docs.
+
+### Completed in PR3B
+
+- Added `internal/cloud/cloudserver/dashboard_session_test.go` coverage for managed dashboard login/session behavior:
+  - managed admin login succeeds;
+  - session cookies contain signed principal claims rather than raw bearer token material;
+  - cookie attributes are `HttpOnly`, `SameSite=Lax`, and `Secure` for HTTPS requests;
+  - managed member sessions can access non-admin dashboard pages but receive `403` on admin dashboard pages;
+  - disabled managed principals are redirected to login on the next protected request;
+  - demoted managed admins lose admin access on the next protected request.
+- Added first-admin dashboard bootstrap coverage in the same test file:
+  - legacy dashboard/admin credential creates the first managed admin;
+  - duplicate first-admin bootstrap is rejected with `409`;
+  - the resulting first admin is recognized as the last usable managed-admin path.
+- Added `internal/cloud/cloudserver/dashboard_session.go` for signed dashboard principal sessions, request-context principal propagation, storage-backed principal revalidation, and the dashboard bootstrap handlers.
+- Updated `internal/cloud/cloudserver/cloudserver.go` to route `/dashboard/bootstrap`, mint principal-claim dashboard cookies for principal-resolved login, revalidate dashboard principals, and derive dashboard admin/display-name state from the revalidated principal.
+- Dashboard bootstrap writes `bootstrap.dashboard` auth audit events for success and denied duplicate/invalid attempts without raw token/cookie metadata.
+
+### Persisted task checkbox updates
+
+The following task lines are now visibly checked in `openspec/changes/cloud-user-token-management/tasks.md`:
+
+- [x] RED: Add dashboard-session tests proving managed admin login succeeds, member admin access fails, disabled/demoted users lose access on the next protected request, and secure cookie attributes are set correctly.
+- [x] GREEN: Update dashboard auth/session handling in `internal/cloud/cloudserver` and `internal/cloud/dashboard` so signed cookies carry principal claims but every protected request revalidates enabled state and role from storage.
+- [x] RED: Add bootstrap tests for legacy dashboard/admin credential creating the first managed admin, rejecting duplicate first-admin bootstrap, and preventing accidental removal of the last usable managed admin path.
+- [x] GREEN: Implement dashboard bootstrap route/handler and last-admin protections, treating `ENGRAM_CLOUD_ADMIN` as explicit bootstrap/recovery access after managed admins exist.
+
+### TDD Cycle Evidence
+
+| Task | Test File | Layer | Safety Net | RED | GREEN | TRIANGULATE | REFACTOR |
+|------|-----------|-------|------------|-----|-------|-------------|----------|
+| PR3B dashboard managed sessions | `internal/cloud/cloudserver/dashboard_session_test.go` | Handler integration with fake principal state store | ✅ `go test ./internal/cloud/cloudserver ./internal/cloud/dashboard ./internal/cloud/auth` passed before production changes | ✅ `go test ./internal/cloud/cloudserver -run 'TestManagedDashboard'` failed before `WithPrincipalStateStore`/principal session helpers existed | ✅ Targeted cloudserver tests passed after signed principal sessions and revalidation were added | ✅ Covered admin, member, disabled, demoted, secure-cookie, and raw-token exclusion cases | ✅ Session signing/revalidation isolated in `dashboard_session.go`; route wiring stayed in `cloudserver.go` |
+| PR3B dashboard bootstrap | `internal/cloud/cloudserver/dashboard_session_test.go` | Handler integration with fake principal/admin store | ✅ Cloudserver package was green after session work | ✅ Earlier RED for `TestDashboardBootstrap...` returned `405 Method Not Allowed` before the route/handler existed | ✅ `go test ./internal/cloud/cloudserver -run 'TestManagedDashboard|TestDashboardBootstrap'` passed after adding bootstrap route/handler | ✅ Covered first-admin success, duplicate rejection, success/denied bootstrap audit events, and last-admin-path recognition | ✅ Bootstrap logic uses the same principal session/recovery helpers and cloudstore last-admin guard remains the authoritative mutation protection |
+
+### Verification run
+
+```bash
+go test ./internal/cloud/cloudserver -run 'TestManagedDashboard|TestDashboardBootstrap'
+go test ./internal/cloud/cloudserver ./internal/cloud/dashboard ./internal/cloud/auth
+go test ./...
+git diff --check
+git diff --cached --check
+```
+
+Results:
+
+- `go test ./internal/cloud/cloudserver -run 'TestManagedDashboard|TestDashboardBootstrap'`: PASS.
+- `go test ./internal/cloud/cloudserver ./internal/cloud/dashboard ./internal/cloud/auth`: PASS.
+- `go test ./...`: PASS.
+- `git diff --check`: PASS.
+- `git diff --cached --check`: PASS (no staged diff).
+
+### Files changed
+
+- `internal/cloud/cloudserver/cloudserver.go`
+- `internal/cloud/cloudserver/dashboard_session.go`
+- `internal/cloud/cloudserver/dashboard_session_test.go`
+- `openspec/changes/cloud-user-token-management/tasks.md`
+- `openspec/changes/cloud-user-token-management/apply-progress.md`
+
+### Deviations from design
+
+- Bootstrap rendering is intentionally minimal HTML in `cloudserver` for this bounded PR3B slice. PR4 remains responsible for managed-user dashboard UX/screens/forms.
+- Routine `/admin/*` mutations still require managed-token admin principals; legacy dashboard/admin credentials are constrained to explicit dashboard bootstrap/recovery handling.
+- Full admin-login and accepted/rejected legacy recovery audit coverage remains for the remaining PR3 audit task; this slice only added dashboard bootstrap success/denied audit events.
+
+### Remaining tasks
+
+Exact unchecked task lines remaining in `tasks.md` after PR3B:
+
+```markdown
+- [ ] RED: Add audit tests for token create/revoke, user create/enable/disable, grant create/revoke, admin login, dashboard bootstrap, accepted/rejected legacy recovery actions, and redaction of raw tokens.
+- [ ] GREEN: Emit synchronous `cloud_auth_audit_log` events for admin/security mutations; fail authoritative admin mutations if audit insertion fails.
+- [ ] Verify: targeted admin/dashboard/bootstrap tests and `go test ./...`.
+- [ ] Rollback boundary: remove admin/bootstrap routes while retaining storage/auth foundation and legacy auth behavior.
+- [ ] RED: Add dashboard rendering/handler tests for `/dashboard/admin/users`, `/dashboard/admin/users/list`, token partials, grant partials, and contributor/managed-user separation.
+- [ ] GREEN: Update `internal/cloud/dashboard/dashboard.go` and related templ/templates/assets to show `Managed Users` separately from contributor analytics.
+- [ ] GREEN: Add server-rendered forms and HTMX-compatible partials for user create, enable/disable, token create/show-once, token revoke, grant create, and grant revoke.
+- [ ] TRIANGULATE: Test non-HTMX form POST/redirect behavior and HTMX partial responses; partials must be meaningful HTML without hidden client-side policy logic.
+- [ ] TRIANGULATE: Test empty states explaining deny-by-default project grants and token show-once warnings.
+- [ ] REFACTOR: Keep policy checks in server/auth/store layers; dashboard code must render outcomes, not make authorization decisions.
+- [ ] Verify: dashboard package tests plus `go test ./...`.
+- [ ] Rollback boundary: remove dashboard UI routes/templates without affecting already-tested admin handlers.
+- [ ] RED: Add CLI tests in `cmd/engram/` for `engram cloud bootstrap admin --username ...`, duplicate bootstrap refusal, optional token issuance printed once, optional project grants, invalid input, and audit event creation.
+- [ ] GREEN: Implement `engram cloud bootstrap admin` in `cmd/engram/cloud.go`, using cloud runtime DB configuration by default and an existing DSN override convention only if already present.
+- [ ] TRIANGULATE: Test that raw managed tokens are never persisted, logged, audited, rendered in token metadata lists, or printed except the creation/bootstrap response.
+- [ ] GREEN: Update docs discovery targets affected by cloud setup and sync auth, starting with `README.md`, `docs/`, `CONTRIBUTING.md`, and any cloud deployment docs found by `rg "ENGRAM_CLOUD_TOKEN|ENGRAM_CLOUD_ADMIN|ENGRAM_CLOUD_ALLOWED_PROJECTS|cloud bootstrap"`.
+- [ ] GREEN: Document managed users/tokens, dedicated token pepper, first-admin dashboard bootstrap, CLI bootstrap, project grants, deny-by-default managed principals, legacy env-token migration, and rollback to legacy sync credentials.
+- [ ] RED: Add regression tests that `/sync/*` route methods, paths, request schemas, and response schemas remain unchanged for existing clients.
+- [ ] GREEN: Fix any contract drift found by regression tests without changing MVP payloads.
+- [ ] REFACTOR: Run `gofmt` on touched Go files and remove any temporary test seams not needed by production behavior.
+- [ ] Verify: `go test ./...`, targeted cloud tests (`go test ./internal/cloud/... ./cmd/engram`), and `go test -cover ./...`.
+- [ ] Rollback boundary: revert CLI/docs/audit hardening slice while keeping prior reviewed server behavior intact.
+```
+
+### Risks / follow-ups
+
+- Remaining PR3 audit task is still unchecked because full admin-login and accepted/rejected legacy recovery audit coverage was not completed in this slice.
+- PR4 managed-user UX and PR5 CLI/docs remain out of scope.

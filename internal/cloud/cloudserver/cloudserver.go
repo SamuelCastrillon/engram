@@ -68,20 +68,22 @@ type staticStatusProvider struct{ status dashboard.SyncStatus }
 func (s staticStatusProvider) Status() dashboard.SyncStatus { return s.status }
 
 type CloudServer struct {
-	store            ChunkStore
-	auth             Authenticator
-	principalAuth    principalResolver
-	projectAuth      ProjectAuthorizer
-	principalProject PrincipalProjectAuthorizer
-	adminIdentity    AdminIdentityStore
-	managedHasher    *cloudauth.ManagedTokenHasher
-	dashboardAdmin   string
-	port             int
-	host             string
-	maxPushBodyBytes int64
-	mux              *http.ServeMux
-	syncStatus       dashboard.SyncStatusProvider
-	listenAndServe   func(addr string, handler http.Handler) error
+	store               ChunkStore
+	auth                Authenticator
+	principalAuth       principalResolver
+	projectAuth         ProjectAuthorizer
+	principalProject    PrincipalProjectAuthorizer
+	principalState      principalStateStore
+	adminIdentity       AdminIdentityStore
+	managedHasher       *cloudauth.ManagedTokenHasher
+	dashboardSessionKey []byte
+	dashboardAdmin      string
+	port                int
+	host                string
+	maxPushBodyBytes    int64
+	mux                 *http.ServeMux
+	syncStatus          dashboard.SyncStatusProvider
+	listenAndServe      func(addr string, handler http.Handler) error
 }
 
 const defaultHost = "127.0.0.1"
@@ -118,6 +120,9 @@ func WithPrincipalProjectAuthorizer(authorizer PrincipalProjectAuthorizer) Optio
 func WithAdminIdentityStore(store AdminIdentityStore) Option {
 	return func(s *CloudServer) {
 		s.adminIdentity = store
+		if state, ok := store.(principalStateStore); ok {
+			s.principalState = state
+		}
 	}
 }
 
@@ -160,6 +165,9 @@ func New(store ChunkStore, authSvc Authenticator, port int, opts ...Option) *Clo
 	}
 	if projectAuthorizer, ok := authSvc.(ProjectAuthorizer); ok {
 		s.projectAuth = projectAuthorizer
+	}
+	if principalState, ok := store.(principalStateStore); ok {
+		s.principalState = principalState
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -207,6 +215,10 @@ func (s *CloudServer) routes() {
 		if adminToken := strings.TrimSpace(s.dashboardAdmin); adminToken != "" && hmac.Equal([]byte(token), []byte(adminToken)) {
 			return nil
 		}
+		if s.principalAuth != nil {
+			_, err := s.principalAuth.ResolveBearerToken(context.Background(), token)
+			return err
+		}
 		if s.auth == nil {
 			return nil
 		}
@@ -215,7 +227,7 @@ func (s *CloudServer) routes() {
 		return s.auth.Authorize(req)
 	}
 	createSessionCookie := func(w http.ResponseWriter, r *http.Request, token string) error {
-		sessionToken, err := s.dashboardSessionToken(token)
+		sessionToken, err := s.dashboardSessionTokenForRequest(r.Context(), token)
 		if err != nil {
 			return err
 		}
@@ -252,9 +264,9 @@ func (s *CloudServer) routes() {
 		IsAdmin: func(r *http.Request) bool {
 			return s.isDashboardAdmin(r)
 		},
-		// GetDisplayName: returns "OPERATOR" until the session codec surfaces a
-		// display name (out of scope for this change). Satisfies REQ-103 / AD-2.
-		GetDisplayName:    func(r *http.Request) string { return "OPERATOR" },
+		GetDisplayName: func(r *http.Request) string {
+			return s.dashboardDisplayName(r)
+		},
 		Store:             dashboardStore,
 		MaxLoginBodyBytes: maxDashboardLoginBodyBytes,
 		StatusProvider:    s.syncStatus,
@@ -343,6 +355,10 @@ func (s *CloudServer) authorizeDashboardRequest(r *http.Request) error {
 	if err != nil {
 		return err
 	}
+	if principal, ok := s.dashboardPrincipalFromCookie(r.Context(), cookie.Value); ok {
+		*r = *r.WithContext(WithPrincipal(r.Context(), principal))
+		return nil
+	}
 	bearerToken, err := s.dashboardBearerToken(cookie.Value)
 	if err != nil {
 		return err
@@ -394,6 +410,9 @@ func (s *CloudServer) handleHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *CloudServer) isDashboardAdmin(r *http.Request) bool {
+	if principal, ok := s.dashboardPrincipalFromRequest(r); ok {
+		return principal.Role == cloudauth.RoleAdmin && (principal.Source == cloudauth.PrincipalSourceManagedToken || principal.Source == cloudauth.PrincipalSourceLegacyEnvAdmin)
+	}
 	if s.auth == nil {
 		return false
 	}
