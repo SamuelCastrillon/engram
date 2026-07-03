@@ -22,13 +22,13 @@ var ErrInvalidDashboardSessionToken = errors.New("invalid dashboard session toke
 var ErrProjectNotAllowed = errors.New("project is not allowed for this token")
 
 type Service struct {
-	store          *cloudstore.CloudStore
-	expectedToken  string
-	dashboardAuth  map[string]struct{}
-	allowed        map[string]struct{}
-	allowedAll     bool
-	jwtSecret      []byte
-	now            func() time.Time
+	store         *cloudstore.CloudStore
+	expectedToken string
+	dashboardAuth map[string]struct{}
+	allowed       map[string]struct{}
+	allowedAll    bool
+	jwtSecret     []byte
+	now           func() time.Time
 }
 
 type ProjectScopeAuthorizer struct {
@@ -291,7 +291,7 @@ func (s *Service) Authorize(r *http.Request) error {
 	if token == "" {
 		return fmt.Errorf("bearer token is required")
 	}
-	if !hmac.Equal([]byte(token), []byte(s.expectedToken)) {
+	if !legacyTokenEqual(token, s.expectedToken) {
 		return fmt.Errorf("invalid bearer token")
 	}
 	return nil
