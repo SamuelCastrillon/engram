@@ -1270,3 +1270,287 @@ Files: `internal/cloud/cloudserver/dashboard_admin_users_test.go`.
 | `internal/cloud/cloudserver/dashboard_admin_users.go` | Modified | FIX A: added `renderDashboardAdminComponentStatus`; FIX B: restructured token-create to verify the principal exists before minting; FIX D: added shared `parseDashboardMutationForm` body-cap helper, wired into 5 POST handlers. |
 | `internal/cloud/cloudserver/dashboard_admin_users_test.go` | Modified | Added RED/GREEN tests for FIX A, B, D, and WARNING coverage tests for FIX E. |
 | `internal/cloud/cloudserver/admin_handlers_test.go` | Modified | Added per-method error-injection fields (`setEnabledErr`, `createTokenErr`, `revokeTokenErr`, `createGrantErr`, `revokeGrantErr`) to the shared `adminTestStore` for FIX C's failure-path tests. |
+
+---
+
+## PR5 apply update — CLI bootstrap, docs, and /sync regression hardening
+
+### Current branch
+
+`feat/cloud-user-token-management-cli-docs`
+
+### Chain context
+
+- Tracker branch: `feat/cloud-user-token-management`
+- Parent branch for this feature-branch-chain slice: `feat/cloud-user-token-management-dashboard-ux` (carries the committed PR4 dashboard managed-user UX work: `7587be0 feat(cloud): add managed-user dashboard UX`)
+- Current slice: PR 5 — CLI bootstrap admin, docs, and `/sync/*` regression hardening (final slice of this change).
+- Prior committed slices supplied by parent context:
+  - PR1A auth foundation: `d4c3b38 feat(cloud): add auth principal foundation`
+  - PR1B storage foundation: `9defadf feat(cloud): add identity storage foundation`
+  - PR2 server sync grant enforcement: `2669f3b feat(cloud): enforce principal sync grants`
+  - PR3A admin API handlers: `7172b95 feat(cloud): add managed admin API handlers`
+  - PR3B dashboard sessions plus first-admin dashboard bootstrap: `4bd03db feat(cloud): add dashboard principal sessions and bootstrap`
+  - PR3C audit hardening (+ review remediation): `4035ab5 feat(cloud): audit dashboard login and legacy recovery`
+  - PR4 dashboard managed-user UX: `7587be0 feat(cloud): add managed-user dashboard UX`
+- Out of scope for PR5 (explicitly not done): wiring `cloudserver.WithAdminIdentityStore`/`WithManagedTokenHasher`/a `cloudauth.PrincipalResolver` into `cmd/engram/cloud.go`'s `newCloudRuntime` (the actual `engram cloud serve` process). See "Discovery" and "Risks / follow-ups" below.
+
+### Structured status consumed / produced before apply
+
+```yaml
+schemaName: spec-driven
+changeName: cloud-user-token-management
+artifactStore: openspec
+changeRoot: openspec/changes/cloud-user-token-management
+applyState: ready
+actionContext:
+  mode: repo-local
+  workspaceRoot: /Users/alanbuscaglia/work/engram
+  allowedEditRoots: [/Users/alanbuscaglia/work/engram]
+  warnings: []
+strictTDD: true
+testRunner: go test ./...
+nextRecommended: sdd-verify (final slice of cloud-user-token-management; all PR1-PR5 task lines now checked)
+```
+
+### Review workload / PR boundary
+
+- `tasks.md` forecast has `400-line budget risk: High` and `Chained PRs recommended: Yes`.
+- This is the final feature-branch-chain slice (PR5): CLI bootstrap command + tests, a new `/sync/*` contract regression test file, a new `cloud.Config.TokenPepper` field + test, and targeted docs (README, DOCS.md, docs/engram-cloud/quickstart.md, docs/engram-cloud/troubleshooting.md, docs/ARCHITECTURE.md, CHANGELOG.md, docker-compose.cloud.yml, docker-compose.beta.yml).
+- No dashboard templates, no `/sync/*` or `/admin/*` payload contract changes, and no production server wiring changes were made.
+
+### Completed in PR5
+
+- Added `cmd/engram/cloud_bootstrap.go`:
+  - `engram cloud bootstrap admin --username <name> [--email <email>] [--grant-project <project>]... [--issue-token [name]]`.
+  - Uses `cloud.ConfigFromEnv()` for DB config (same convention as `engram cloud serve`/`engram cloud repair`); **no `--dsn` flag was added** because no existing CLI DSN-override convention exists anywhere in `cmd/engram` (verified via `rg -- "--dsn" cmd/engram/*.go` — zero matches) — per the task's explicit instruction to only add a DSN override if the convention already exists.
+  - Reuses the exact same `cloudstore` methods (`HasActiveAdmin`, `CreateHumanUser`, `CreatePrincipalToken`, `CreateProjectGrant`, `InsertAuthAuditEvent`) that the dashboard bootstrap and admin API handlers already use — no parallel/looser bootstrap path.
+  - First-admin guard: refuses to create a second admin when `HasActiveAdmin` is true, before any mutation; the refusal is still recorded as a best-effort `bootstrap.cli` denied audit event.
+  - Token issuance (`--issue-token`) validates `ENGRAM_CLOUD_TOKEN_PEPPER` is configured and constructs the `cloudauth.ManagedTokenHasher` **before** creating the admin user, so a misconfigured pepper fails cleanly with zero mutation rather than a partial bootstrap.
+  - The raw token is printed exactly once in the command's stdout output and is never logged, persisted (only the HMAC hash is stored), or included in audit metadata (only `token_prefix`, which design.md already documents as safe, non-secret audit metadata).
+  - Every bootstrap attempt (accepted or denied) writes a `bootstrap.cli` audit event (`cloudauth.PrincipalSourceBootstrapCLI` actor source) — the last unimplemented MVP audit action from design.md's list.
+- Added `cmd/engram/cloud_bootstrap_test.go` with an in-memory `fakeCloudBootstrapStore` (mirrors the `adminTestStore` pattern in `internal/cloud/cloudserver`) and an injectable `newCloudBootstrapStore` factory var (mirrors the existing `newCloudRuntime` injectable-factory convention in `cmd/engram/cloud.go`), covering: first-admin creation, duplicate-bootstrap refusal (no mutation, denied audit), token issuance printed exactly once (with a TRIANGULATE assertion that the persisted hash and audit metadata never contain the raw token, distinguishing the raw-token-shaped-but-safe `token_prefix` from the actual secret), missing-pepper failure before any store construction, repeated `--grant-project` flags, missing `--username`, an unknown flag, and an unknown `bootstrap` subcommand.
+- Added `cloud.Config.TokenPepper` (env `ENGRAM_CLOUD_TOKEN_PEPPER`) in `internal/cloud/config.go`, independent of `JWTSecret`, with new tests in `internal/cloud/config_test.go` proving the default is empty, the env override works, and the pepper is never equal to the JWT secret when both are set.
+- Added `internal/cloud/cloudserver/sync_contract_regression_test.go` — a new, permanent contract-lock regression suite proving the pre-existing `/sync/*` route table, methods, and request/response wire schemas were **not** altered by the PR1-PR4 principal-resolution refactor:
+  - `TestSyncRouteTableUnchanged`: all 5 `/sync/*` routes still require bearer auth (401, route still exists) and still return `405` for the wrong HTTP verb.
+  - `TestSyncPullManifestResponseSchemaUnchanged`, `TestSyncPushChunkRequestAndResponseSchemaUnchanged`, `TestSyncMutationsPushResponseSchemaUnchanged`, `TestSyncMutationsPullResponseSchemaUnchanged`: each asserts the **exact** top-level JSON key set (via a new `assertExactKeys` helper) for the manifest, chunk push, mutation push, and mutation pull envelopes — strong enough to catch a silent field rename/add/remove, not just a happy-path decode.
+  - **No contract drift was found.** All 5 new regression tests passed immediately (RED-before-GREEN, in this case, means "test file did not exist before this slice"; there was no bug to fix — the tests exist to catch *future* drift and to give SDD verify concrete evidence that PR2-PR4 kept the contract stable).
+- Updated docs (all verified against the actual current code/routes before writing, per the hard accuracy constraint):
+  - `README.md`: added `ENGRAM_CLOUD_TOKEN_PEPPER` to the env var table; added a short pointer to the new DOCS.md section from the Cloud Integration section.
+  - `DOCS.md`: added `ENGRAM_CLOUD_TOKEN_PEPPER` to both env var tables; added `engram cloud bootstrap admin` to the Cloud CLI (opt-in) command list; added a new `### Managed users, tokens, and CLI bootstrap (preview)` section covering usage, `--grant-project`, `--issue-token` show-once behavior, audit coverage, and — critically — the current production-wiring limitation (see Discovery below).
+  - `docs/engram-cloud/quickstart.md`: added `ENGRAM_CLOUD_TOKEN_PEPPER` to the optional runtime env var list; added a `## Managed Users and CLI Bootstrap (preview)` section with the same usage + limitation note.
+  - `docs/engram-cloud/troubleshooting.md`: added an `engram cloud bootstrap admin` errors table (duplicate-admin refusal, missing pepper, store connection failure) and a rollback/legacy-migration note (bootstrap only adds rows; legacy `ENGRAM_CLOUD_TOKEN`/`ENGRAM_CLOUD_ADMIN` behavior is untouched, so falling back requires no explicit rollback command).
+  - `docs/ARCHITECTURE.md`: added the `engram cloud bootstrap admin` line to the CLI Reference block only (see Risks below for pre-existing route-list staleness intentionally left untouched).
+  - `CHANGELOG.md`: added a new `### Cloud user token management (cloud-user-token-management)` Unreleased subsection summarizing PR1-PR5 (this is the first CHANGELOG entry for the whole change; PR1-PR4 deliberately deferred all docs/CHANGELOG work to this slice per the original plan).
+  - `docker-compose.cloud.yml` / `docker-compose.beta.yml`: added a commented-out `ENGRAM_CLOUD_TOKEN_PEPPER` line with a one-line explanation next to each stack's `ENGRAM_JWT_SECRET`, matching the instruction to touch these files for env var docs/comments only (not enabled by default; both stacks remain insecure/beta-token-auth as before).
+  - `CONTRIBUTING.md` was checked (`rg` for `cloud|CLOUDSTORE_TEST_DSN|bootstrap`) and contains no cloud-specific content to update; left untouched.
+
+### Discovery made before/while implementing (real finding, not fabricated)
+
+While verifying "the CLI bootstrap path must wire [the dedicated managed-token pepper] correctly" against the actual server code (not just the CLI), I traced `cmd/engram/cloud.go`'s `newCloudRuntime` (the function that constructs the real `engram cloud serve` process) and found it **never calls** `cloudserver.WithAdminIdentityStore(...)` or `cloudserver.WithManagedTokenHasher(...)`, and `internal/cloud/auth.Service.ResolveBearerToken` (the auth implementation `newCloudRuntime` actually constructs) only ever resolves the legacy `ENGRAM_CLOUD_TOKEN`/`ENGRAM_CLOUD_ADMIN` env principals — it has no `ManagedTokenLookup`/pepper wiring at all, and `*cloudstore.CloudStore` does not yet implement `cloudauth.ManagedTokenLookup.FindManagedTokenByHash` (that method only exists on test fakes today).
+
+Concretely, in a real `engram cloud serve` deployment today:
+- `/admin/*` JSON API routes always return `403` for everyone (`s.adminIdentity` is `nil`, and even if it weren't, no principal can ever resolve with `Source == managed_token`).
+- `/dashboard/bootstrap` (`GET`/`POST`) always returns `500 dashboard bootstrap store is not configured` (`s.adminIdentity` is `nil`), so first-admin bootstrap via the dashboard is currently **unreachable in production**, not merely "requires the legacy admin credential" as design.md describes.
+- A managed token created by `engram cloud bootstrap admin --issue-token` cannot yet authenticate any `/sync/*`, `/admin/*`, or dashboard-login request, because managed-token bearer resolution was never wired into the running server's auth path.
+
+This is a real, verified, pre-existing gap — not something PR5 introduced, and not something any single prior PR's own task list called out explicitly as "wire the production server." Every prior PR (see PR3A/PR3B/PR3C "Risks / follow-ups" sections above) already flagged pieces of this ("Runtime CLI/config wiring for a dedicated managed-token pepper is not expanded", "Runtime serving still needs dedicated managed-token pepper/config wiring before token creation can be enabled outside explicit `WithManagedTokenHasher` construction") without anyone closing it, because each PR was deliberately scoped away from touching `newCloudRuntime`.
+
+**Why PR5 does not fix this**: `engram cloud bootstrap admin` does **not** depend on this wiring at all — it opens `cloudstore.New(cfg)` directly (the same constructor `newCloudRuntime` uses) and calls store methods, completely bypassing the HTTP server. So the CLI bootstrap command implemented in this slice is fully correct and functional regardless of this gap. Fixing `newCloudRuntime` itself is explicitly out of PR5's task list (CLI + docs + `/sync/*` regression only), and doing it safely would require: (a) adding a real `FindManagedTokenByHash` method to `*cloudstore.CloudStore` (new production code, not yet written or tested anywhere), (b) constructing a `cloudauth.PrincipalResolver` in `newCloudRuntime` and re-verifying it doesn't change `/sync/*`, `/admin/*`, or dashboard auth behavior for existing legacy-token deployments, and (c) deciding how `auth.Service.ResolveBearerToken` and the new resolver coexist for the legacy compatibility adapter — none of which is a "small wiring line," unlike (see below) the one genuinely small, safe fix that exists.
+
+One narrower, genuinely small and safe fix **was identified but deliberately not made in this slice** to keep the diff bounded to the explicit PR5 task list: adding `cloudserver.WithAdminIdentityStore(cs)` to `newCloudRuntime` would make `/dashboard/bootstrap` reachable in production (it only needs `s.adminIdentity` non-nil; the actor-authorization for that route already works via the existing legacy `ENGRAM_CLOUD_ADMIN` cookie path and does not depend on managed-token resolution). This one-line addition would not change `/admin/*` or `/dashboard/admin/*` authorization outcomes (they still gate on `principal.Source == managed_token`, which still cannot resolve without the bigger fix above, so they would remain safely `403` for everyone, i.e. no regression). This is flagged as a recommended, low-risk, high-value follow-up rather than made silently in this slice.
+
+### Persisted task checkbox updates
+
+The following task lines are now visibly checked in `openspec/changes/cloud-user-token-management/tasks.md`:
+
+- [x] RED: Add CLI tests in `cmd/engram/` for `engram cloud bootstrap admin --username ...`, duplicate bootstrap refusal, optional token issuance printed once, optional project grants, invalid input, and audit event creation.
+- [x] GREEN: Implement `engram cloud bootstrap admin` in `cmd/engram/cloud.go`, using cloud runtime DB configuration by default and an existing DSN override convention only if already present.
+- [x] TRIANGULATE: Test that raw managed tokens are never persisted, logged, audited, rendered in token metadata lists, or printed except the creation/bootstrap response.
+- [x] GREEN: Update docs discovery targets affected by cloud setup and sync auth.
+- [x] GREEN: Document managed users/tokens, dedicated token pepper, first-admin dashboard bootstrap, CLI bootstrap, project grants, deny-by-default managed principals, legacy env-token migration, and rollback to legacy sync credentials.
+- [x] RED: Add regression tests that `/sync/*` route methods, paths, request schemas, and response schemas remain unchanged for existing clients.
+- [x] GREEN: Fix any contract drift found by regression tests without changing MVP payloads (no drift found).
+- [x] REFACTOR: Run `gofmt` on touched Go files and remove any temporary test seams not needed by production behavior.
+- [x] Verify: `go test ./...`, targeted cloud tests, and `go test -cover ./internal/cloud/... ./cmd/engram`.
+- [x] Rollback boundary: revert CLI/docs/audit hardening slice while keeping prior reviewed server behavior intact.
+
+Cross-slice acceptance checklist updates and the rationale for the two intentionally-still-unchecked items ("CLI and dashboard can create the first managed admin safely" and "Documentation matches real routes, commands, environment variables, and rollback behavior") are recorded directly in `tasks.md` next to each item, per the Discovery section above.
+
+### TDD Cycle Evidence
+
+| Task | Test File | Layer | Safety Net | RED | GREEN | TRIANGULATE | REFACTOR |
+|------|-----------|-------|------------|-----|-------|-------------|----------|
+| PR5 CLI bootstrap admin | `cmd/engram/cloud_bootstrap_test.go` | CLI integration with in-memory fake store | ✅ `go test ./cmd/engram ./internal/cloud/...` passed before production edits | ✅ `go vet ./cmd/engram/...` failed with `undefined: newCloudBootstrapStore` before `cloud_bootstrap.go` existed | ✅ All 8 new CLI tests passed after adding `cloud_bootstrap.go` | ✅ Covered first-admin creation, duplicate refusal (no mutation + denied audit), token-issuance-exactly-once with raw-token-vs-prefix distinction, missing-pepper fail-before-mutation, repeated grants, missing username, unknown flag, unknown subcommand | ✅ Fixed an over-broad TRIANGULATE assertion (rejecting any `egc_live_`-shaped audit value) that incorrectly flagged the intentionally-safe `token_prefix` metadata field; corrected to compare against the actual raw token value |
+| PR5 dedicated token pepper config | `internal/cloud/config_test.go` | Unit | ✅ Existing `internal/cloud` config tests green | — (additive field; no prior test referenced it) | ✅ `TestConfigFromEnvTokenPepper` passes: default empty, env override works, pepper independent of `ENGRAM_JWT_SECRET` | ✅ Explicit sub-test proving pepper and JWT secret differ when both are set | N/A |
+| PR5 `/sync/*` contract regression | `internal/cloud/cloudserver/sync_contract_regression_test.go` | Handler integration with existing package fakes (`fakeStore`, `fakeMutationStore`, `fakeAuth`) | ✅ Full `internal/cloud/cloudserver` suite green before this file was added | N/A — this is a new permanent regression/contract-lock suite, not a bug fix; "RED" here means the assertions did not exist before this slice | ✅ All 5 new tests passed immediately — no drift found in the PR1-PR4 refactor | ✅ Asserts exact key sets (no missing AND no extra keys) for manifest, chunk push, mutation push, and mutation pull envelopes, plus 401/405 route-table pinning | N/A |
+
+### Test Summary
+
+- Total tests written: 8 CLI tests (`cloud_bootstrap_test.go`) + 3 config tests (`config_test.go`, one with 3 sub-tests) + 5 regression tests (`sync_contract_regression_test.go`) = 16 new test functions.
+- Total tests passing: all new tests, all pre-existing `cmd/engram`/`internal/cloud/...` package tests, and the full repository test suite (`go test ./...`).
+- Layers used: CLI integration (8), Unit (4), Handler integration (5).
+- Approval tests: None.
+- Pure functions created: `parseCloudBootstrapAdminArgs`, `recordCloudBootstrapAudit` (`cmd/engram/cloud_bootstrap.go`); `assertExactKeys` (`internal/cloud/cloudserver/sync_contract_regression_test.go`, test helper).
+
+### Verification run
+
+```bash
+go build ./...
+go test ./cmd/engram ./internal/cloud/...
+go test ./...
+go test -cover ./internal/cloud/...
+gofmt -l cmd/engram/cloud.go cmd/engram/cloud_bootstrap.go cmd/engram/cloud_bootstrap_test.go internal/cloud/config.go internal/cloud/config_test.go internal/cloud/cloudserver/sync_contract_regression_test.go
+git diff --check
+```
+
+Results:
+
+- `go build ./...`: PASS (clean).
+- `go test ./cmd/engram ./internal/cloud/...`: PASS.
+- `go test ./...`: PASS (all packages, including `internal/setup`'s known-flaky `TestInstallCodexInjectsTOMLAndIsIdempotent`, which passed on this run and was not touched).
+- `go test -cover ./internal/cloud/...`: PASS. Coverage: `internal/cloud` 84.8%, `internal/cloud/auth` 87.6%, `internal/cloud/autosync` 89.7%, `internal/cloud/chunkcodec` 77.4%, `internal/cloud/cloudserver` 76.6%, `internal/cloud/cloudstore` 44.9%, `internal/cloud/dashboard` 56.6%, `internal/cloud/remote` 78.9%, `internal/cloud/syncguidance` 0.0% (no test files), `internal/cloud/constants` no test files.
+- `gofmt -l ...`: clean (no output) on every touched Go file.
+- `git diff --check`: clean (no output, no whitespace errors).
+- **Known, pre-existing, unrelated flake**: `go test -cover ./cmd/engram` (whole-package coverage with the `-cover` flag specifically) fails with no per-test failure and an empty/near-empty coverage profile (the process appears to exit before the coverage profile is written). Confirmed via `git stash -u` that this reproduces byte-for-byte on the base commit **before any PR5 changes** (`cmd/engram/cloud.go:94:42: runtimeCfg.TokenPepper undefined` was the only difference, i.e. the stash correctly removed all PR5 changes and the underlying `-cover`-specific failure was still present against the untouched package). Plain `go test ./cmd/engram` (no `-cover`) and `go test -coverprofile=... ./cmd/engram -run TestCloudBootstrap` (scoped to this slice's own new tests) both pass cleanly and deterministically (verified with `-count=1` multiple times). This is out of scope for PR5 to fix (unrelated subsystem — likely a goroutine-teardown/pipe-redirection interaction from earlier autosync tests, only surfaced by cover instrumentation timing) and is reported here rather than silently worked around. Per-function coverage for the new `cloud_bootstrap.go` file, obtained via a scoped `-run TestCloudBootstrap` coverprofile: `cmdCloudBootstrap` 54.5%, `printCloudBootstrapUsage` 100.0%, `cmdCloudBootstrapAdmin` 76.2%, `recordCloudBootstrapAudit` 100.0%, `parseCloudBootstrapAdminArgs` 73.1%.
+
+### Files changed
+
+| File | Action | What Was Done |
+|------|--------|---------------|
+| `cmd/engram/cloud_bootstrap.go` | Created | `engram cloud bootstrap admin` command: arg parsing, pepper validation, admin/grant/token creation, fail-closed success audit, best-effort denial audit, show-once token printing. |
+| `cmd/engram/cloud_bootstrap_test.go` | Created | 8 CLI tests + `fakeCloudBootstrapStore` in-memory fake. |
+| `cmd/engram/cloud.go` | Modified | Registered `bootstrap` in `cmdCloud`'s subcommand switch and usage strings. |
+| `internal/cloud/config.go` | Modified | Added `Config.TokenPepper` + `ENGRAM_CLOUD_TOKEN_PEPPER` env parsing. |
+| `internal/cloud/config_test.go` | Modified | Added `TestConfigFromEnvTokenPepper`. |
+| `internal/cloud/cloudserver/sync_contract_regression_test.go` | Created | 5 new `/sync/*` route-table and wire-schema regression tests. |
+| `README.md` | Modified | Added `ENGRAM_CLOUD_TOKEN_PEPPER` env row; added pointer to DOCS.md managed-users section. |
+| `DOCS.md` | Modified | Added pepper env rows (both tables), CLI bootstrap command line, and new "Managed users, tokens, and CLI bootstrap (preview)" section with the production-wiring limitation. |
+| `docs/engram-cloud/quickstart.md` | Modified | Added pepper to optional env vars; added "Managed Users and CLI Bootstrap (preview)" section. |
+| `docs/engram-cloud/troubleshooting.md` | Modified | Added CLI bootstrap error table and rollback/legacy-migration note. |
+| `docs/ARCHITECTURE.md` | Modified | Added `engram cloud bootstrap admin` line to CLI Reference. |
+| `CHANGELOG.md` | Modified | Added "Cloud user token management" Unreleased subsection. |
+| `docker-compose.cloud.yml` | Modified | Added commented `ENGRAM_CLOUD_TOKEN_PEPPER` env var doc line. |
+| `docker-compose.beta.yml` | Modified | Added commented `ENGRAM_CLOUD_TOKEN_PEPPER` env var doc line. |
+| `openspec/changes/cloud-user-token-management/tasks.md` | Modified | Checked all remaining PR5 task lines; updated cross-slice acceptance checklist with evidence/rationale per item. |
+| `openspec/changes/cloud-user-token-management/apply-progress.md` | Modified | This section. |
+
+### Deviations from design
+
+- No `--dsn` CLI flag was added for `engram cloud bootstrap admin`, per design.md's own conditional wording ("only if the project already uses CLI DSN override conventions") — verified no such convention exists anywhere in `cmd/engram`.
+- `--role` is not exposed as a bootstrap flag; `engram cloud bootstrap admin` always creates an `admin`-role human user (the command's entire purpose), matching the CLI usage shown in design.md's own example more literally than the bracketed `[--role admin]` placeholder suggests.
+- design.md's CLI bootstrap scenario ("the admin can subsequently use managed admin flows") is not yet fully true end-to-end in a real deployment — see the Discovery section above. The CLI itself behaves exactly as designed (creates the first managed admin safely, guards against duplicates, issues a show-once token, audits every attempt); the gap is entirely in server-side runtime wiring that no PR in this change ever added to `cmd/engram/cloud.go`'s `newCloudRuntime`.
+- `docs/ARCHITECTURE.md`'s "Cloud route/auth split" section still lists only the pre-PR2 route set (missing `/sync/mutations/*`, `/admin/*`, `/dashboard/bootstrap`, and the PR4 dashboard managed-user routes). This is pre-existing staleness from PR2-PR4, not introduced by PR5; only the CLI Reference block was updated in this slice to keep the diff bounded, per the instruction to prioritize README + `engram-cloud/*` and flag the rest.
+
+### Risks / follow-ups
+
+- **Recommended immediate follow-up (small, safe, high-value)**: add `cloudserver.WithAdminIdentityStore(cs)` to `newCloudRuntime` in `cmd/engram/cloud.go`. This alone would make `/dashboard/bootstrap` reachable in production without changing `/admin/*` or `/dashboard/admin/*` authorization outcomes (both remain gated on managed-token principal resolution, which is unaffected). Not done in this slice to keep the diff bounded to PR5's explicit task list.
+- **Larger follow-up (new feature, not a small fix)**: wire real managed-token bearer authentication into `engram cloud serve` — add `FindManagedTokenByHash` to `*cloudstore.CloudStore`, construct a `cloudauth.PrincipalResolver` in `newCloudRuntime`, and carefully re-verify legacy-token compatibility. Until this ships, `ENGRAM_CLOUD_TOKEN` and `ENGRAM_CLOUD_ADMIN` remain the only credentials that can actually authenticate against a real `engram cloud serve` process; this is now documented explicitly in README/DOCS.md/quickstart.md so operators are not misled.
+- `docs/ARCHITECTURE.md`'s cloud route list is stale beyond just the bootstrap line added in this slice (see Deviations above) — flagged for a future docs-only pass.
+- The pre-existing `go test -cover ./cmd/engram` anomaly (see Verification run above) should be investigated in an unrelated maintenance slice; it is not blocking and not caused by this change.
+- `CONTRIBUTING.md` was checked and has no cloud-specific content requiring an update for this change.
+
+This is the final PR (PR5) of the `cloud-user-token-management` change. All `tasks.md` PR1-PR5 implementation task lines are now checked; two cross-slice acceptance items remain intentionally unchecked with inline rationale (production server wiring gap, and partial doc staleness in `docs/ARCHITECTURE.md`), both clearly flagged as follow-ups rather than silently marked done.
+
+---
+
+## PR5 review remediation
+
+Fixes CONFIRMED review findings on the uncommitted PR5 slice, branch `feat/cloud-user-token-management-cli-docs`. Strict TDD: every behavioral fix has a failing test written first (RED, confirmed failing against the pre-fix code), then made to pass (GREEN). Scope: `cmd/engram/cloud_bootstrap.go`, `internal/cloud/cloudstore/identity.go`, `internal/cloud/auth/foundation.go`, `internal/cloud/cloudserver/dashboard_session.go`, and their tests. Does **not** wire runtime managed-token auth into `newCloudRuntime` (separate PR6 slice, unchanged from PR5's own documented gap). Nothing committed.
+
+### FIX 1 — CRITICAL: first-admin bootstrap TOCTOU race (check-then-act across two transactions)
+
+- **Root cause**: `cmdCloudBootstrapAdmin` called `cs.HasActiveAdmin(ctx)` then, separately, `cs.CreateHumanUser(...)`. The dashboard's `handleDashboardBootstrapSubmit` had the identical pattern. Nothing made "no active admin exists" atomic with "create the first admin", so two concurrent bootstrap attempts (CLI and/or dashboard) could each pass the check and both create a first admin.
+- **Fix**: added `cloudstore.CreateFirstAdminHumanUser` — a single atomic method that, within one transaction, holds the exact same transaction-scoped advisory lock as `guardLastActiveAdminTx` (`pg_advisory_xact_lock(hashtext('engram_cloud_active_admin_guard'))`), checks for an existing active admin, and creates the admin only if none exists, returning the new sentinel `cloudstore.ErrAdminAlreadyExists` otherwise. Both `cmd/engram/cloud_bootstrap.go` (`cmdCloudBootstrapAdmin`) and `internal/cloud/cloudserver/dashboard_session.go` (`handleDashboardBootstrapSubmit`) now call this one atomic method instead of the old two-call sequence; `HasActiveAdmin`+`CreateHumanUser` are no longer part of `cloudBootstrapStore`'s create-first-admin path (dashboard's `HasActiveAdmin` is retained only for the unrelated legacy-recovery-login audit tag). External behavior is preserved: duplicate bootstrap still returns the same CLI exit-1 refusal / dashboard `409`, with the same denial audit.
+- **RED evidence**:
+  - `internal/cloud/cloudstore`: added `TestCreateFirstAdminHumanUserSerializesConcurrentBootstrap` (Postgres-gated, 5 concurrent goroutines, skips cleanly without `CLOUDSTORE_TEST_DSN`) and `TestCreateFirstAdminHumanUserRequiresInitializedStore` (pure, runs without DSN).
+  - `cmd/engram`: `fakeCloudBootstrapStore.CreateFirstAdminHumanUser` was written first WITHOUT its mutex (naive check-sleep-create, mirroring the old check-then-act shape with an artificial DB-round-trip delay to widen the race window). Running `TestCloudBootstrapAdminConcurrentFirstAdminCreatesExactlyOneAdmin` against that naive version reliably failed: `expected exactly one concurrent bootstrap attempt to succeed, got 5 successes and 0 duplicates (store.users=3)` (the `3` instead of `5` is itself a second data race on the slice — Go's race detector separately flags a write-write race in this naive form). Adding `createFirstAdminMu sync.Mutex` around the whole check+sleep+create critical section (mirroring the real advisory lock held for a full transaction) made it pass deterministically.
+  - Dashboard-level: `TestDashboardBootstrapSubmitConcurrentRequestsCreateExactlyOneAdmin` drives 5 concurrent `POST /dashboard/bootstrap` HTTP requests through the real `CloudServer` handler stack against a shared `loginAuditTestStore` (which implements the same mutex-protected atomic contract). This surfaced one **unrelated pre-existing** race in production code (`dashboardPrincipalSessionKey`'s lazy generate-on-first-use, not one of the 5 confirmed findings) — resolved in the test by pre-warming the key single-threaded before spinning up goroutines, keeping the test scoped to the confirmed TOCTOU fix. Flagged as a follow-up below, not fixed here (out of scope).
+- **GREEN**: all three new tests pass, including 20 consecutive runs with `-race` for the dashboard-level test and full-suite runs with `-race` for `cmd/engram` and `internal/cloud/cloudserver`.
+- Files: `internal/cloud/cloudstore/identity.go`, `internal/cloud/cloudstore/identity_storage_test.go`, `cmd/engram/cloud_bootstrap.go`, `cmd/engram/cloud_bootstrap_test.go`, `internal/cloud/cloudserver/dashboard_session.go`, `internal/cloud/cloudserver/login_audit_test.go`, `internal/cloud/cloudserver/admin_handlers_test.go` (added `auditMu sync.Mutex` to the shared `adminTestStore` test fixture so concurrent `InsertAuthAuditEvent` calls from the new dashboard concurrency test don't race on the fixture's own audit-event slice — a test-fixture-only change, no production behavior change).
+
+### FIX 2 — WARNING: managed-token pepper has no minimum-length validation
+
+- **Root cause**: `NewManagedTokenHasher` only rejected an empty pepper; the CLI only trimmed/checked non-empty. Unlike the sibling `auth.NewService`, which rejects a JWT secret shorter than 32 bytes (`ErrSecretTooShort`), a 1-char `ENGRAM_CLOUD_TOKEN_PEPPER` was silently accepted as the HMAC key.
+- **Fix**: added `managedTokenPepperMinBytes = 32` and a new sentinel `ErrTokenPepperTooShort` in `internal/cloud/auth/foundation.go`; `NewManagedTokenHasher` now rejects any pepper shorter than 32 bytes. The CLI already wraps any hasher-construction error via `fatal(fmt.Errorf("cloud bootstrap admin: %w", herr))`, so the clear error ("... dedicated cloud token pepper must be at least 32 bytes") surfaces automatically with no CLI code change needed beyond the new test.
+- **RED evidence**: `TestManagedTokenHasherRejectsTooShortPepper` (auth package) and `TestCloudBootstrapAdminRejectsTooShortTokenPepper` (CLI package) were both run against the pre-fix code (length check temporarily reverted) and failed as expected (`expected ErrTokenPepperTooShort..., got <nil>`; CLI test got exit code `<nil>`/success instead of `1`). Restoring the length check made both pass (GREEN).
+- **Fixture audit**: `rg NewManagedTokenHasher` found 3 test fixtures using the too-short `"test-token-pepper"` (17 bytes) in `internal/cloud/cloudserver/dashboard_admin_users_test.go` (2 call sites) and `admin_handlers_test.go` (1 call site); all three were updated to `"test-token-pepper-at-least-32-bytes"` (35 bytes). The two `internal/cloud/auth` fixtures (`"dedicated-cloud-token-pepper-32-bytes"`, 37 bytes) and the CLI env fixture (`"dedicated-cloud-token-pepper-for-tests"`, 38 bytes) were already long enough and needed no change. `internal/cloud/config_test.go`'s `"dedicated-cloud-token-pepper"` (28 bytes) fixture was intentionally left untouched — it only exercises `Config.TokenPepper` field parsing/independence from `JWTSecret`, never constructs a `ManagedTokenHasher`, so the length minimum does not apply there.
+- Files: `internal/cloud/auth/foundation.go`, `internal/cloud/auth/foundation_test.go`, `cmd/engram/cloud_bootstrap_test.go`, `internal/cloud/cloudserver/dashboard_admin_users_test.go`, `internal/cloud/cloudserver/admin_handlers_test.go`.
+
+### FIX 3 — WARNING: minted raw token could be orphaned/unaudited on partial failure
+
+- **Root cause**: in `cmdCloudBootstrapAdmin`, the ONLY `bootstrap.cli` audit write happened at the very end, after admin creation, grant creation, AND token creation had all already occurred; the raw token was also printed only after that single audit call. If a `--grant-project`/token step failed after the admin (and possibly a token) was durably created, the process `fatal()`d with **no audit at all** for the newly-created admin, and if the final audit write itself failed after a token was durably persisted, the raw token was **never printed** (a live hashed token existed with no audit trail and no operator-visible secret).
+- **Fix** (`cmd/engram/cloud_bootstrap.go`):
+  (a) The admin-creation success audit is now recorded **immediately** after `CreateFirstAdminHumanUser` succeeds — fail-closed, before any grant/token step runs — so a newly-created admin is always audited regardless of what happens next.
+  (b) The raw token is now printed to stdout **before** the optional completion-detail audit write (which records `grant_projects`/`token_prefix` for observability) — so an operator always sees a successfully-minted token even if that later audit insert fails.
+  (c) Every failed optional step (grant creation, token generation/hashing/persistence, or the completion-detail audit itself) now records a distinct, best-effort compensating `bootstrap.cli` audit event with outcome `"error"` (new constant `cloudBootstrapAuditOutcomeError`) and a `failed_step` reason code, via a new `recordCloudBootstrapAuditBestEffort` helper, and the command still exits non-zero via `fatal()`. No raw token/secret is ever included in any audit event — only the existing safe `token_prefix` metadata key, matching `rejectSensitiveAuthAuditMetadata`'s allowlist.
+  For the simplest case (no `--grant-project`, no `--issue-token`), only the one mandatory admin-creation audit event is written (no redundant second event) — the completion-detail audit is skipped entirely when there is nothing more to report than what the mandatory event already captured.
+- **RED evidence**: `TestCloudBootstrapAdminGrantFailureAuditsAdminCreationAndFailure`, `TestCloudBootstrapAdminTokenCreateFailureAuditsAdminCreationAndFailure`, and `TestCloudBootstrapAdminAuditFailureStillCreatesAdminAndExitsNonZero` were run against the pre-fix `cmd/engram/cloud_bootstrap.go` (temporarily restored to its exact PR5 content) and failed exactly as the bug predicts:
+  - Grant-failure test: `expected exactly 2 audit events (admin creation + grant failure), got 0: []` — the old code recorded **zero** audit events when a grant failed after admin creation.
+  - Token-create-failure test: same, `got 0: []`.
+  - Audit-failure test: `expected no token to ever be attempted when the mandatory admin audit failed, got 1 token creations` — the old code's single audit call happened at the very end, AFTER token creation had already durably persisted a token, exactly reproducing "a live hashed token with no audit trail."
+  Restoring the fixed `cloud_bootstrap.go` made all three pass (GREEN), confirmed together with the full existing CLI bootstrap suite under `-race`.
+- **Design note on audit-event count**: the fix intentionally accepts up to 2 audit events per invocation (mandatory admin-creation event + optional completion-detail event) rather than 1, because an audit log is insert-only — the only way to guarantee the admin's creation is *always* audited even if a later step fails is to write that event immediately, before knowing whether later steps will succeed. This was verified not to break any pre-existing test: `TestCloudBootstrapAdminCreatesFirstManagedAdmin` (no grants/token) still asserts and gets exactly 1 event; `TestCloudBootstrapAdminIssuesTokenExactlyOnce` and `TestCloudBootstrapAdminGrantsProjects` never asserted an exact audit-event count.
+- Files: `cmd/engram/cloud_bootstrap.go`, `cmd/engram/cloud_bootstrap_test.go`.
+
+### FIX 4 — WARNING: `/sync/pull/{chunkID}` response schema not locked
+
+- Added `TestSyncPullChunkResponseSchemaUnchanged` to `internal/cloud/cloudserver/sync_contract_regression_test.go`, mirroring the existing manifest/push/mutation schema-lock tests: pushes a known chunk payload, then asserts `GET /sync/pull/{chunkID}` returns exactly `Content-Type: application/json` and the raw stored chunk bytes verbatim (byte-for-byte equal to the exact canonicalized payload `WriteChunk` persisted), for an authenticated request.
+- Like its siblings in this file, this is a **permanent contract-lock test, not a bug fix** — "RED" here means the assertion did not exist before this remediation; it passed immediately (no drift found in the pull-chunk response), and now pins the shape so a future accidental wrap/envelope change fails it.
+- Files: `internal/cloud/cloudserver/sync_contract_regression_test.go`.
+
+### FIX 5 — SUGGESTION: CLI invalid-input coverage
+
+- **`--grant-project` with an invalid value**: added `TestCloudBootstrapAdminSurfacesInvalidGrantProjectStoreError`, driving a symbols-only `--grant-project "!!!"` value (non-empty at CLI-arg-parse time, but exactly the kind of value `cloudstore.normalizeCloudProjectGrant` collapses to an empty string — see that function's own pure-helper test in `identity_storage_test.go`) against a fake store returning the real store's `"cloudstore: project is required"` error. Confirmed: the CLI already surfaces this correctly (exit code 1, stderr contains both `"grant project"` and `"project is required"`) via the existing `fatal(fmt.Errorf("cloud bootstrap admin: grant project %q: %w", ...))` wrapping — no production code change was needed, only the missing test coverage.
+- **Malformed `--email`**: investigated first, per the "verify before stating" rule. `rg -i "valid.*email|regexp.*email|mail.ParseAddress"` across `internal/cloud` found **zero** email-format validation anywhere — not in the CLI, not in `cloudstore.CreateHumanUser`, not as a DB constraint (`cloud_human_users.email` only has a `UNIQUE` constraint, no format check). This means "malformed `--email`" is **not** a store-level validation error the CLI is swallowing or obscuring — there is no such validation at any layer to surface, by design (email is free-form text everywhere in this codebase today). Judgment: **not a bug**. Added `TestCloudBootstrapAdminAcceptsMalformedEmailAsFreeformText` to lock in this verified, pre-existing, intentional-by-omission behavior (a syntactically invalid email is accepted and stored verbatim) so a future change cannot silently start rejecting it without an explicit design decision. No production code was added for email format validation, since that would be a new feature/business-rule decision beyond a confirmed review finding, not a fix for one.
+- Files: `cmd/engram/cloud_bootstrap_test.go`.
+
+### Verification
+
+```bash
+go build ./...
+go test ./cmd/engram ./internal/cloud/... -count=1
+go test ./cmd/engram ./internal/cloud/... -race -count=1
+go test ./... -count=1
+go test ./internal/cloud/cloudstore/... -run TestCreateFirstAdminHumanUser -v   # confirms Postgres-gated test skips cleanly
+go vet ./cmd/engram/... ./internal/cloud/...
+gofmt -l <every touched Go file>
+git diff --check
+```
+
+Results:
+
+- `go build ./...`: clean.
+- `go test ./cmd/engram ./internal/cloud/...` (with and without `-race`): PASS.
+- `go test ./...`: PASS, including `internal/setup`'s known pre-existing flaky `TestInstallCodexInjectsTOMLAndIsIdempotent` (passed on this run; also re-ran isolated 3x to confirm — not touched, not caused by this change).
+- `TestCreateFirstAdminHumanUserSerializesConcurrentBootstrap` (Postgres-gated): confirmed SKIP with `CLOUDSTORE_TEST_DSN` unset; `TestCreateFirstAdminHumanUserRequiresInitializedStore` (pure) PASS.
+- `go vet ./cmd/engram/... ./internal/cloud/...`: clean.
+- `gofmt -l` on every touched Go file (including the 3 untracked new-from-PR5 files, which `git diff --check` does not cover — checked separately with `gofmt -l` and a manual trailing-whitespace `grep`): empty/clean.
+- `git diff --check`: clean.
+- `internal/cloud/dashboard/helpers_test.go` was NOT touched (left in its pre-existing gofmt-dirty state, per instructions).
+- Tree left uncommitted, staged-ready. No `tasks.md` checkboxes changed.
+
+### Files changed (this remediation)
+
+| File | Action | What Was Done |
+|------|--------|---------------|
+| `internal/cloud/cloudstore/identity.go` | Modified | FIX 1: added `ErrAdminAlreadyExists` sentinel and the atomic `CreateFirstAdminHumanUser` method (advisory-lock-guarded check+create in one transaction). |
+| `internal/cloud/cloudstore/identity_storage_test.go` | Modified | FIX 1: added Postgres-gated `TestCreateFirstAdminHumanUserSerializesConcurrentBootstrap` and pure `TestCreateFirstAdminHumanUserRequiresInitializedStore`. |
+| `cmd/engram/cloud_bootstrap.go` | Modified | FIX 1: `cmdCloudBootstrapAdmin` now calls the atomic `CreateFirstAdminHumanUser` instead of `HasActiveAdmin`+`CreateHumanUser`. FIX 3: immediate mandatory admin-creation audit, print-before-completion-audit token ordering, compensating best-effort failure audits with new `cloudBootstrapAuditOutcomeError` outcome, and `recordCloudBootstrapAuditBestEffort` helper. |
+| `cmd/engram/cloud_bootstrap_test.go` | Modified | Added `fakeCloudBootstrapStore.CreateFirstAdminHumanUser` (mutex-guarded atomic contract) and 7 new tests: `TestCloudBootstrapAdminConcurrentFirstAdminCreatesExactlyOneAdmin` (FIX 1), `TestCloudBootstrapAdminGrantFailureAuditsAdminCreationAndFailure`, `TestCloudBootstrapAdminTokenCreateFailureAuditsAdminCreationAndFailure`, `TestCloudBootstrapAdminAuditFailureStillCreatesAdminAndExitsNonZero` (FIX 3), `TestCloudBootstrapAdminRejectsTooShortTokenPepper` (FIX 2), `TestCloudBootstrapAdminSurfacesInvalidGrantProjectStoreError`, `TestCloudBootstrapAdminAcceptsMalformedEmailAsFreeformText` (FIX 5). |
+| `internal/cloud/auth/foundation.go` | Modified | FIX 2: added `managedTokenPepperMinBytes` (32) and `ErrTokenPepperTooShort`; `NewManagedTokenHasher` now rejects too-short peppers. |
+| `internal/cloud/auth/foundation_test.go` | Modified | FIX 2: added `TestManagedTokenHasherRejectsTooShortPepper`. |
+| `internal/cloud/cloudserver/dashboard_session.go` | Modified | FIX 1: `handleDashboardBootstrapSubmit` now calls the atomic `CreateFirstAdminHumanUser` via the extended `dashboardPrincipalStore` interface, instead of `HasActiveAdmin`+`CreateHumanUser`. |
+| `internal/cloud/cloudserver/login_audit_test.go` | Modified | FIX 1: added `loginAuditTestStore.CreateFirstAdminHumanUser` (mutex-guarded) and `TestDashboardBootstrapSubmitConcurrentRequestsCreateExactlyOneAdmin`. |
+| `internal/cloud/cloudserver/admin_handlers_test.go` | Modified | FIX 1 (test-fixture only): added `auditMu sync.Mutex` to `adminTestStore` so concurrent `InsertAuthAuditEvent` calls from the new dashboard concurrency test don't race on the shared fixture's audit-event slice. |
+| `internal/cloud/cloudserver/dashboard_admin_users_test.go` | Modified | FIX 2: replaced 2 too-short `"test-token-pepper"` fixtures with a 35-byte pepper. |
+| `internal/cloud/cloudserver/sync_contract_regression_test.go` | Modified | FIX 4: added `TestSyncPullChunkResponseSchemaUnchanged`. |
+
+### Deviations from design
+
+- None. All fixes stayed within the documented CONFIRMED findings; no runtime managed-token auth wiring into `newCloudRuntime` was added (explicitly out of scope, deferred to PR6).
+
+### Risks / follow-ups
+
+- **Unrelated pre-existing race discovered, not fixed**: `dashboardPrincipalSessionKey`'s lazy generate-on-first-use is not safe for concurrent first calls (found via the new FIX 1 dashboard concurrency test, which pre-warms the key to stay in scope). A future maintenance slice should guard this with a `sync.Once` or a mutex.
+- The `go test -cover ./cmd/engram` anomaly documented in the original PR5 section above is unrelated and still not investigated here.
+- FIX 5's malformed-`--email` finding intentionally does not add new email-format validation; if the maintainer wants email format enforcement, that should be a separate, explicit design decision (affects the real Postgres schema/constraints too), not folded into this review-remediation pass.

@@ -31,6 +31,9 @@ services:
       ENGRAM_CLOUD_ALLOWED_PROJECTS: smoke-project
       ENGRAM_CLOUD_HOST: 0.0.0.0
       ENGRAM_PORT: "18080"
+      # ENGRAM_CLOUD_TOKEN_PEPPER: replace-with-dedicated-managed-token-pepper
+      # Only needed to run `engram cloud bootstrap admin --issue-token` against
+      # this stack. Must be a secret distinct from ENGRAM_JWT_SECRET above.
     ports:
       - "127.0.0.1:18080:18080"
     command: ["cloud", "serve"]

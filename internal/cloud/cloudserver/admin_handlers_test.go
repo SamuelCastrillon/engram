@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,6 +25,13 @@ type adminTestStore struct {
 	auditEvents   []cloudstore.AuthAuditEvent
 	auditErr      error
 	createUserErr error
+
+	// auditMu guards auditEvents against concurrent InsertAuthAuditEvent
+	// calls. Real cloudstore-backed audit inserts are independent Postgres
+	// INSERTs with no shared in-process state; this fake's plain slice needs
+	// its own lock to be safely callable from concurrent goroutines (see
+	// TestDashboardBootstrapSubmitConcurrentRequestsCreateExactlyOneAdmin).
+	auditMu sync.Mutex
 
 	// PR4 review remediation (FIX C): per-method error injection so tests can
 	// prove mutation handlers surface store failures as errors instead of
@@ -181,13 +189,15 @@ func (s *adminTestStore) InsertAuthAuditEvent(_ context.Context, event cloudstor
 	if strings.TrimSpace(event.ActorSource) == "" {
 		return errors.New("actor source is required")
 	}
+	s.auditMu.Lock()
+	defer s.auditMu.Unlock()
 	s.auditEvents = append(s.auditEvents, event)
 	return nil
 }
 
 func adminHandlerTestServer(t *testing.T, principal cloudauth.Principal, store *adminTestStore) *CloudServer {
 	t.Helper()
-	hasher, err := cloudauth.NewManagedTokenHasher([]byte("test-token-pepper"))
+	hasher, err := cloudauth.NewManagedTokenHasher([]byte("test-token-pepper-at-least-32-bytes"))
 	if err != nil {
 		t.Fatalf("new token hasher: %v", err)
 	}

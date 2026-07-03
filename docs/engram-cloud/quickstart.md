@@ -85,6 +85,7 @@ Required runtime env vars:
 
 Optional runtime env vars:
 - `ENGRAM_CLOUD_MAX_PUSH_BYTES` (defaults to `8388608`)
+- `ENGRAM_CLOUD_TOKEN_PEPPER` (only required if you plan to run `engram cloud bootstrap admin --issue-token`; see [Managed users and CLI bootstrap](#managed-users-and-cli-bootstrap-preview) below)
 
 Dokploy guidance:
 1. Create a managed Postgres service.
@@ -130,6 +131,24 @@ Notes:
 - `ENGRAM_JWT_SECRET` must be an explicit, non-default strong secret in authenticated mode.
 - `ENGRAM_CLOUD_ALLOWED_PROJECTS` is required server-side and should be a comma-separated allowlist.
 - `ENGRAM_CLOUD_MAX_PUSH_BYTES` optionally raises or lowers the server-side limit for chunk and mutation push request bodies. Omit it to keep the default 8 MiB limit.
+
+## Managed Users and CLI Bootstrap (preview)
+
+`engram cloud bootstrap admin` creates the first **managed admin** (a `cloud_principals` row, distinct from the legacy `ENGRAM_CLOUD_TOKEN`/`ENGRAM_CLOUD_ADMIN` env-token model):
+
+```bash
+engram cloud bootstrap admin --username alice \
+  --grant-project my-project \
+  --issue-token first-token
+```
+
+- `--grant-project` may repeat; managed principals are deny-by-default (no grants means no sync access for that principal).
+- `--issue-token [name]` prints the raw managed token exactly once and requires `ENGRAM_CLOUD_TOKEN_PEPPER` to be set to a dedicated secret, separate from `ENGRAM_JWT_SECRET`.
+- Running bootstrap again once a managed admin exists is refused (no silent duplicate admin), and every attempt — accepted or refused — is recorded as a `bootstrap.cli` audit event.
+
+**Preview limitation:** server-side authentication for managed tokens is not wired into `engram cloud serve` yet — only `ENGRAM_CLOUD_TOKEN` (sync) and `ENGRAM_CLOUD_ADMIN` (dashboard) authenticate requests today. A managed admin/token created here is durably stored and audited, ready for when that wiring ships, but cannot yet log into the dashboard or authenticate `/sync/*`/`/admin/*` requests. Keep using `ENGRAM_CLOUD_TOKEN`/`ENGRAM_CLOUD_ADMIN` for now. Full details: [DOCS.md — Managed users, tokens, and CLI bootstrap](../../DOCS.md#managed-users-tokens-and-cli-bootstrap-preview).
+
+---
 
 Reference compose:
 

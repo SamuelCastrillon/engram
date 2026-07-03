@@ -49,6 +49,14 @@ type dashboardPrincipalStore interface {
 	principalStateStore
 	HasActiveAdmin(ctx context.Context) (bool, error)
 	CreateHumanUser(ctx context.Context, params cloudstore.CreateHumanUserParams) (cloudstore.HumanUser, error)
+	// CreateFirstAdminHumanUser MUST be used (instead of a separate
+	// HasActiveAdmin-then-CreateHumanUser sequence) for first-admin
+	// dashboard bootstrap: see handleDashboardBootstrapSubmit. Doing the
+	// check and the create as two separate calls reintroduces a
+	// check-then-act (TOCTOU) race where two concurrent bootstrap attempts
+	// (dashboard and/or CLI) could both observe "no active admin" and both
+	// create a first admin.
+	CreateFirstAdminHumanUser(ctx context.Context, params cloudstore.CreateHumanUserParams) (cloudstore.HumanUser, error)
 	InsertAuthAuditEvent(ctx context.Context, event cloudstore.AuthAuditEvent) error
 }
 
@@ -423,24 +431,26 @@ func (s *CloudServer) handleDashboardBootstrapSubmit(w http.ResponseWriter, r *h
 		http.Error(w, "invalid form", http.StatusBadRequest)
 		return
 	}
-	hasAdmin, err := store.HasActiveAdmin(r.Context())
-	if err != nil {
-		writeActionableError(w, http.StatusInternalServerError, constants.UpgradeErrorClassBlocked, constants.UpgradeErrorCodeInternal, fmt.Sprintf("check active admin: %v", err))
-		return
-	}
-	if hasAdmin {
-		_ = s.recordDashboardBootstrapAudit(r.Context(), store, actor, authAuditOutcomeDenied, "managed_admin_exists", "")
-		writeActionableError(w, http.StatusConflict, constants.UpgradeErrorClassPolicy, constants.ReasonPolicyForbidden, "first managed admin already exists")
-		return
-	}
 	username := strings.TrimSpace(r.FormValue("username"))
 	if username == "" {
 		_ = s.recordDashboardBootstrapAudit(r.Context(), store, actor, authAuditOutcomeDenied, "username_required", "")
 		writeActionableError(w, http.StatusBadRequest, constants.UpgradeErrorClassRepairable, constants.UpgradeErrorCodePayloadInvalid, "username is required")
 		return
 	}
-	user, err := store.CreateHumanUser(r.Context(), cloudstore.CreateHumanUserParams{Username: username, Email: r.FormValue("email"), DisplayName: r.FormValue("display_name"), Role: cloudstore.PrincipalRoleAdmin})
+	// Atomic check-and-create: store.CreateFirstAdminHumanUser checks for an
+	// existing active admin and creates the new admin within a single
+	// transaction (see cloudstore.CreateFirstAdminHumanUser), instead of the
+	// old HasActiveAdmin-then-CreateHumanUser sequence, which left a
+	// check-then-act (TOCTOU) window where two concurrent bootstrap attempts
+	// (dashboard and/or CLI) could both observe "no active admin" and both
+	// create a first admin.
+	user, err := store.CreateFirstAdminHumanUser(r.Context(), cloudstore.CreateHumanUserParams{Username: username, Email: r.FormValue("email"), DisplayName: r.FormValue("display_name")})
 	if err != nil {
+		if errors.Is(err, cloudstore.ErrAdminAlreadyExists) {
+			_ = s.recordDashboardBootstrapAudit(r.Context(), store, actor, authAuditOutcomeDenied, "managed_admin_exists", "")
+			writeActionableError(w, http.StatusConflict, constants.UpgradeErrorClassPolicy, constants.ReasonPolicyForbidden, "first managed admin already exists")
+			return
+		}
 		_ = s.recordDashboardBootstrapAudit(r.Context(), store, actor, authAuditOutcomeDenied, "create_admin_failed", "")
 		writeActionableError(w, http.StatusBadRequest, constants.UpgradeErrorClassRepairable, constants.UpgradeErrorCodePayloadInvalid, fmt.Sprintf("create first admin: %v", err))
 		return

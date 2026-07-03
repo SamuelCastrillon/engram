@@ -299,6 +299,18 @@ Do not manually edit SQLite without a backup.
 
 ---
 
+## `engram cloud bootstrap admin` errors
+
+| Message | Cause | Next step |
+|---|---|---|
+| `a managed admin already exists; refusing to create a duplicate first admin via CLI bootstrap` | A managed admin was already bootstrapped (via CLI or dashboard). | This is expected safety behavior, not a bug. Use the existing managed admin, or a documented recovery path, instead of re-running first-admin bootstrap. |
+| `--issue-token requires ENGRAM_CLOUD_TOKEN_PEPPER to be configured` | `--issue-token` was passed without `ENGRAM_CLOUD_TOKEN_PEPPER` set. | Set `ENGRAM_CLOUD_TOKEN_PEPPER` to a dedicated secret (distinct from `ENGRAM_JWT_SECRET`) and re-run. No admin/user was created by the failed attempt. |
+| `connect cloud store` | `ENGRAM_DATABASE_URL` is missing/unreachable, same as any other `engram cloud` database command. | Verify `ENGRAM_DATABASE_URL` and that Postgres is reachable, same as `engram cloud serve`. |
+
+Rollback / legacy migration path: `engram cloud bootstrap admin` only adds new `cloud_principals`/`cloud_human_users`/`cloud_principal_tokens`/`cloud_project_grants` rows — it never disables `ENGRAM_CLOUD_TOKEN` or `ENGRAM_CLOUD_ADMIN`. If you want to stop using managed admins/tokens, simply keep using the legacy env credentials; no migration or rollback command is required to fall back. See [DOCS.md — Managed users, tokens, and CLI bootstrap](../../DOCS.md#managed-users-tokens-and-cli-bootstrap-preview) for the current preview limitation (server-side managed-token authentication is not wired into `engram cloud serve` yet).
+
+---
+
 ## Verification Checklist
 
 After any repair, verify in this order:

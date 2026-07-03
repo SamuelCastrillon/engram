@@ -23,7 +23,7 @@ func dashboardAdminUsersTestServer(t *testing.T) (*CloudServer, *loginAuditTestS
 	store.principals["p-admin"] = dashboardStoredPrincipal("p-admin", cloudstore.PrincipalRoleAdmin, true)
 	admin := dashboardManagedPrincipal("p-admin", cloudstore.PrincipalRoleAdmin, true)
 	authn := resolvingAuth{principals: map[string]cloudauth.Principal{"admin-token": admin}}
-	hasher, err := cloudauth.NewManagedTokenHasher([]byte("test-token-pepper"))
+	hasher, err := cloudauth.NewManagedTokenHasher([]byte("test-token-pepper-at-least-32-bytes"))
 	if err != nil {
 		t.Fatalf("new token hasher: %v", err)
 	}
@@ -567,7 +567,7 @@ func TestDashboardManagedUserDetailHidesRevokeFormForRevokedTokens(t *testing.T)
 func TestDashboardLegacyAdminCanViewButNotMutateManagedUsers(t *testing.T) {
 	store := newLoginAuditTestStore()
 	store.users = append(store.users, cloudstore.HumanUser{PrincipalID: "p-target", Username: "target-user", Role: "member", Enabled: true})
-	hasher, err := cloudauth.NewManagedTokenHasher([]byte("test-token-pepper"))
+	hasher, err := cloudauth.NewManagedTokenHasher([]byte("test-token-pepper-at-least-32-bytes"))
 	if err != nil {
 		t.Fatalf("new token hasher: %v", err)
 	}

@@ -305,6 +305,67 @@ func TestCloudstoreLastActiveAdminGuardSerializesConcurrentRemoval(t *testing.T)
 	}
 }
 
+// TestCreateFirstAdminHumanUserSerializesConcurrentBootstrap proves
+// CreateFirstAdminHumanUser closes the CLI/dashboard first-admin bootstrap
+// TOCTOU race at the real Postgres layer: N concurrent callers racing to
+// bootstrap the first admin against the same database must result in
+// exactly one created admin and every other attempt receiving
+// ErrAdminAlreadyExists, never two (or more) admins created.
+func TestCreateFirstAdminHumanUserSerializesConcurrentBootstrap(t *testing.T) {
+	ctx := context.Background()
+	cs := openIsolatedCloudStore(t)
+
+	const attempts = 5
+	type result struct {
+		user HumanUser
+		err  error
+	}
+	results := make(chan result, attempts)
+	for i := 0; i < attempts; i++ {
+		go func(i int) {
+			user, err := cs.CreateFirstAdminHumanUser(ctx, CreateHumanUserParams{
+				Username: fmt.Sprintf("racer-%d", i),
+				Email:    fmt.Sprintf("racer-%d@example.test", i),
+			})
+			results <- result{user: user, err: err}
+		}(i)
+	}
+
+	var successes, duplicates int
+	for i := 0; i < attempts; i++ {
+		r := <-results
+		switch {
+		case r.err == nil:
+			successes++
+		case errors.Is(r.err, ErrAdminAlreadyExists):
+			duplicates++
+		default:
+			t.Fatalf("unexpected error from concurrent first-admin bootstrap: %v", r.err)
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("expected exactly one concurrent bootstrap attempt to succeed, got %d successes and %d duplicates", successes, duplicates)
+	}
+	if duplicates != attempts-1 {
+		t.Fatalf("expected the other %d attempts to be refused as duplicates, got %d", attempts-1, duplicates)
+	}
+
+	var adminCount int
+	if err := cs.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM cloud_principals WHERE role = $1 AND enabled = TRUE`, PrincipalRoleAdmin).Scan(&adminCount); err != nil {
+		t.Fatalf("count active admins: %v", err)
+	}
+	if adminCount != 1 {
+		t.Fatalf("expected exactly 1 durably persisted admin despite concurrent bootstrap attempts, got %d", adminCount)
+	}
+}
+
+func TestCreateFirstAdminHumanUserRequiresInitializedStore(t *testing.T) {
+	cs := &CloudStore{}
+	if _, err := cs.CreateFirstAdminHumanUser(context.Background(), CreateHumanUserParams{Username: "alice"}); err == nil {
+		t.Fatal("expected an error from an uninitialized store, got nil")
+	}
+}
+
 func TestCloudstoreIdentityPureHelpers(t *testing.T) {
 	cases := map[string]string{
 		"Alpha Project":     "alpha-project",

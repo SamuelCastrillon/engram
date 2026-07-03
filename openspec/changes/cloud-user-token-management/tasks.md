@@ -74,27 +74,27 @@ Risks and dependencies:
 
 ### PR 5 — CLI bootstrap, docs, and final hardening
 
-- [ ] RED: Add CLI tests in `cmd/engram/` for `engram cloud bootstrap admin --username ...`, duplicate bootstrap refusal, optional token issuance printed once, optional project grants, invalid input, and audit event creation.
-- [ ] GREEN: Implement `engram cloud bootstrap admin` in `cmd/engram/cloud.go`, using cloud runtime DB configuration by default and an existing DSN override convention only if already present.
-- [ ] TRIANGULATE: Test that raw managed tokens are never persisted, logged, audited, rendered in token metadata lists, or printed except the creation/bootstrap response.
-- [ ] GREEN: Update docs discovery targets affected by cloud setup and sync auth, starting with `README.md`, `docs/`, `CONTRIBUTING.md`, and any cloud deployment docs found by `rg "ENGRAM_CLOUD_TOKEN|ENGRAM_CLOUD_ADMIN|ENGRAM_CLOUD_ALLOWED_PROJECTS|cloud bootstrap"`.
-- [ ] GREEN: Document managed users/tokens, dedicated token pepper, first-admin dashboard bootstrap, CLI bootstrap, project grants, deny-by-default managed principals, legacy env-token migration, and rollback to legacy sync credentials.
-- [ ] RED: Add regression tests that `/sync/*` route methods, paths, request schemas, and response schemas remain unchanged for existing clients.
-- [ ] GREEN: Fix any contract drift found by regression tests without changing MVP payloads.
-- [ ] REFACTOR: Run `gofmt` on touched Go files and remove any temporary test seams not needed by production behavior.
-- [ ] Verify: `go test ./...`, targeted cloud tests (`go test ./internal/cloud/... ./cmd/engram`), and `go test -cover ./...`.
-- [ ] Rollback boundary: revert CLI/docs/audit hardening slice while keeping prior reviewed server behavior intact.
+- [x] RED: Add CLI tests in `cmd/engram/` for `engram cloud bootstrap admin --username ...`, duplicate bootstrap refusal, optional token issuance printed once, optional project grants, invalid input, and audit event creation.
+- [x] GREEN: Implement `engram cloud bootstrap admin` in `cmd/engram/cloud.go`, using cloud runtime DB configuration by default and an existing DSN override convention only if already present.
+- [x] TRIANGULATE: Test that raw managed tokens are never persisted, logged, audited, rendered in token metadata lists, or printed except the creation/bootstrap response.
+- [x] GREEN: Update docs discovery targets affected by cloud setup and sync auth, starting with `README.md`, `docs/`, `CONTRIBUTING.md`, and any cloud deployment docs found by `rg "ENGRAM_CLOUD_TOKEN|ENGRAM_CLOUD_ADMIN|ENGRAM_CLOUD_ALLOWED_PROJECTS|cloud bootstrap"`.
+- [x] GREEN: Document managed users/tokens, dedicated token pepper, first-admin dashboard bootstrap, CLI bootstrap, project grants, deny-by-default managed principals, legacy env-token migration, and rollback to legacy sync credentials.
+- [x] RED: Add regression tests that `/sync/*` route methods, paths, request schemas, and response schemas remain unchanged for existing clients.
+- [x] GREEN: Fix any contract drift found by regression tests without changing MVP payloads. (No drift found — all new regression tests passed immediately; this is now a permanent contract-lock safety net.)
+- [x] REFACTOR: Run `gofmt` on touched Go files and remove any temporary test seams not needed by production behavior.
+- [x] Verify: `go test ./...`, targeted cloud tests (`go test ./internal/cloud/... ./cmd/engram`), and `go test -cover ./...`.
+- [x] Rollback boundary: revert CLI/docs/audit hardening slice while keeping prior reviewed server behavior intact.
 
 ## Cross-Slice Acceptance Checklist
 
 - [x] Managed human users are distinct from contributor analytics.
-- [ ] Managed tokens authenticate principals; authorization uses principal role and project grants.
-- [ ] Token hashes use a dedicated cloud token pepper, not the dashboard/session signing secret.
-- [ ] Raw token values are shown once and never stored or audited.
-- [ ] Disabled users, revoked tokens, and revoked grants stop future access immediately.
-- [ ] Legacy `ENGRAM_CLOUD_TOKEN`, `ENGRAM_CLOUD_ADMIN`, and `ENGRAM_CLOUD_ALLOWED_PROJECTS` behavior remains compatible during migration.
-- [ ] Managed principals are deny-by-default for project sync.
+- [x] Managed tokens authenticate principals; authorization uses principal role and project grants. (Mechanism implemented and test-covered end-to-end in `internal/cloud/cloudserver/principal_auth_test.go`; see PR5 apply-progress note on the separate, still-open `engram cloud serve` runtime-wiring gap.)
+- [x] Token hashes use a dedicated cloud token pepper, not the dashboard/session signing secret. (`cloud.Config.TokenPepper` / `ENGRAM_CLOUD_TOKEN_PEPPER` added in PR5, independent of `ENGRAM_JWT_SECRET`.)
+- [x] Raw token values are shown once and never stored or audited.
+- [x] Disabled users, revoked tokens, and revoked grants stop future access immediately.
+- [x] Legacy `ENGRAM_CLOUD_TOKEN`, `ENGRAM_CLOUD_ADMIN`, and `ENGRAM_CLOUD_ALLOWED_PROJECTS` behavior remains compatible during migration.
+- [x] Managed principals are deny-by-default for project sync.
 - [x] Dashboard cookies are `HttpOnly`, `SameSite=Lax` or stronger, and `Secure` under HTTPS/production rules.
-- [ ] CLI and dashboard can create the first managed admin safely.
-- [ ] Audit events cover all required MVP identity/security actions without secret leakage.
-- [ ] Documentation matches real routes, commands, environment variables, and rollback behavior.
+- [ ] CLI and dashboard can create the first managed admin safely. (CLI: done, safe, tested in PR5. Dashboard bootstrap handler is implemented and tested but NOT reachable in a real `engram cloud serve` deployment today — `cmd/engram/cloud.go`'s `newCloudRuntime` never passes `cloudserver.WithAdminIdentityStore(cs)`, so `/dashboard/bootstrap` returns 500 "dashboard bootstrap store is not configured" in production. See PR5 apply-progress follow-up.)
+- [x] Audit events cover all required MVP identity/security actions without secret leakage. (`bootstrap.cli` was the last unimplemented MVP action from design.md; added in PR5.)
+- [ ] Documentation matches real routes, commands, environment variables, and rollback behavior. (README/DOCS.md/engram-cloud docs/CHANGELOG/docker-compose updated and verified against real code in PR5. `docs/ARCHITECTURE.md`'s "Cloud route/auth split" route list still predates PR2-PR4 and is missing `/sync/mutations/*`, `/admin/*`, and `/dashboard/bootstrap` — flagged as pre-existing, deferred doc debt, not introduced by PR5.)

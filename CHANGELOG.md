@@ -25,6 +25,16 @@ Breaking changes are always marked with a `type:breaking-change` label and docum
 
 - **fix(cloud):** make chunk and mutation push payload limits configurable with `ENGRAM_CLOUD_MAX_PUSH_BYTES` while preserving the 8 MiB default.
 
+### Cloud user token management (`cloud-user-token-management`)
+
+- **feat(cloud):** add principal/human-user/token/project-grant/audit storage foundation (`cloud_principals`, `cloud_human_users`, `cloud_principal_tokens`, `cloud_project_grants`, `cloud_auth_audit_log`) alongside existing sync tables.
+- **feat(cloud):** enforce managed-principal project grants for sync chunk/mutation push and pull while preserving legacy `ENGRAM_CLOUD_ALLOWED_PROJECTS` behavior.
+- **feat(cloud):** add managed admin API handlers (`/admin/users`, `/admin/users/{id}/tokens`, `/admin/users/{id}/grants`, and related enable/disable/revoke routes) and dashboard managed-user UX, with audit-backed mutations.
+- **feat(cloud):** add dashboard managed-principal sessions and first-admin dashboard bootstrap (`/dashboard/bootstrap`), including audit coverage for admin login and legacy-recovery actions.
+- **feat(cloud):** add `engram cloud bootstrap admin --username <name> [--email <email>] [--grant-project <project>]... [--issue-token [name]]` CLI command to create the first managed admin headlessly, with duplicate-bootstrap refusal and `bootstrap.cli` audit events.
+- **feat(cloud):** add `ENGRAM_CLOUD_TOKEN_PEPPER` for dedicated managed-token hashing, distinct from `ENGRAM_JWT_SECRET`.
+- Server-side managed-token authentication wiring into `engram cloud serve` is a known follow-up — see [DOCS.md — Managed users, tokens, and CLI bootstrap](DOCS.md#managed-users-tokens-and-cli-bootstrap-preview). `ENGRAM_CLOUD_TOKEN`/`ENGRAM_CLOUD_ADMIN` remain the supported authentication path for this release.
+
 ### Pi package (`pi-engram`)
 
 - **fix(plugin):** allow `mem_session_summary` to accept an explicit `project` fallback when automatic project detection is unavailable.

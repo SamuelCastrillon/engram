@@ -151,12 +151,12 @@ type cloudConfig struct {
 func cmdCloud(cfg store.Config) {
 	if len(os.Args) < 3 {
 		fmt.Fprintln(os.Stderr, "usage: engram cloud <subcommand> [options]")
-		fmt.Fprintln(os.Stderr, "supported subcommands: status, enroll, config, serve, upgrade, repair")
+		fmt.Fprintln(os.Stderr, "supported subcommands: status, enroll, config, serve, upgrade, repair, bootstrap")
 		exitFunc(1)
 	}
 	if os.Args[2] == "--help" || os.Args[2] == "-h" || os.Args[2] == "help" {
 		fmt.Println("usage: engram cloud <subcommand> [options]")
-		fmt.Println("supported subcommands: status, enroll, config, serve, upgrade, repair")
+		fmt.Println("supported subcommands: status, enroll, config, serve, upgrade, repair, bootstrap")
 		return
 	}
 
@@ -173,9 +173,11 @@ func cmdCloud(cfg store.Config) {
 		cmdCloudUpgrade(cfg)
 	case "repair":
 		cmdCloudRepair()
+	case "bootstrap":
+		cmdCloudBootstrap()
 	default:
 		fmt.Fprintf(os.Stderr, "unknown cloud command: %s\n", os.Args[2])
-		fmt.Fprintln(os.Stderr, "supported subcommands: status, enroll, config, serve, upgrade, repair")
+		fmt.Fprintln(os.Stderr, "supported subcommands: status, enroll, config, serve, upgrade, repair, bootstrap")
 		exitFunc(1)
 	}
 }

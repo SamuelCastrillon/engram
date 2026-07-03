@@ -26,6 +26,7 @@ var (
 	ErrInvalidPrincipalRole   = errors.New("cloudstore: invalid principal role")
 	ErrLastActiveAdmin        = errors.New("cloudstore: cannot remove last active admin")
 	ErrSensitiveAuditMetadata = errors.New("cloudstore: sensitive auth audit metadata is not allowed")
+	ErrAdminAlreadyExists     = errors.New("cloudstore: a managed admin already exists")
 )
 
 type Principal struct {
@@ -253,6 +254,79 @@ func (cs *CloudStore) CreateHumanUser(ctx context.Context, params CreateHumanUse
 	}
 	if err := tx.Commit(); err != nil {
 		return HumanUser{}, fmt.Errorf("cloudstore: commit human user: %w", err)
+	}
+	human.DisplayName = principal.DisplayName
+	human.Role = principal.Role
+	human.Enabled = principal.Enabled
+	return human, nil
+}
+
+// CreateFirstAdminHumanUser atomically checks for an existing active admin
+// and creates the first managed admin human user within a single
+// transaction, using the same transaction-scoped advisory lock as
+// guardLastActiveAdminTx (key "engram_cloud_active_admin_guard"). This
+// closes a check-then-act (TOCTOU) race: two callers (the CLI bootstrap
+// command and/or the dashboard first-admin bootstrap route) invoking
+// HasActiveAdmin then CreateHumanUser as two separate calls could both
+// observe "no active admin" and both create a first admin. Callers MUST use
+// this method instead of that check-then-act sequence for first-admin
+// bootstrap.
+//
+// Returns ErrAdminAlreadyExists (no mutation) if an active admin already
+// exists. params.Role is ignored — this method always creates an
+// admin-role principal, matching its sole purpose.
+func (cs *CloudStore) CreateFirstAdminHumanUser(ctx context.Context, params CreateHumanUserParams) (HumanUser, error) {
+	if cs == nil || cs.db == nil {
+		return HumanUser{}, fmt.Errorf("cloudstore: not initialized")
+	}
+	username := strings.TrimSpace(params.Username)
+	if username == "" {
+		return HumanUser{}, fmt.Errorf("cloudstore: username is required")
+	}
+	displayName := strings.TrimSpace(params.DisplayName)
+	if displayName == "" {
+		displayName = username
+	}
+
+	tx, err := cs.db.BeginTx(ctx, nil)
+	if err != nil {
+		return HumanUser{}, fmt.Errorf("cloudstore: begin first admin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Same advisory lock key as guardLastActiveAdminTx: first-admin creation
+	// serializes with concurrent admin-removal/demotion guard transactions
+	// as well as with concurrent first-admin bootstrap attempts.
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext('engram_cloud_active_admin_guard'))`); err != nil {
+		return HumanUser{}, fmt.Errorf("cloudstore: lock active admin guard: %w", err)
+	}
+	var exists bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM cloud_principals WHERE role = $1 AND enabled = TRUE)`, PrincipalRoleAdmin).Scan(&exists); err != nil {
+		return HumanUser{}, fmt.Errorf("cloudstore: check existing admin: %w", err)
+	}
+	if exists {
+		return HumanUser{}, ErrAdminAlreadyExists
+	}
+
+	var principal Principal
+	const principalQ = `
+		INSERT INTO cloud_principals (kind, display_name, role, enabled)
+		VALUES ($1, $2, $3, TRUE)
+		RETURNING id::text, kind, display_name, role, enabled, created_at, updated_at`
+	if err := tx.QueryRowContext(ctx, principalQ, PrincipalKindHuman, displayName, PrincipalRoleAdmin).Scan(&principal.ID, &principal.Kind, &principal.DisplayName, &principal.Role, &principal.Enabled, &principal.CreatedAt, &principal.UpdatedAt); err != nil {
+		return HumanUser{}, fmt.Errorf("cloudstore: create first admin principal: %w", err)
+	}
+
+	const humanQ = `
+		INSERT INTO cloud_human_users (principal_id, username, email)
+		VALUES ($1, $2, $3)
+		RETURNING principal_id::text, username, COALESCE(email, ''), created_at`
+	var human HumanUser
+	if err := tx.QueryRowContext(ctx, humanQ, principal.ID, username, nullableText(params.Email)).Scan(&human.PrincipalID, &human.Username, &human.Email, &human.CreatedAt); err != nil {
+		return HumanUser{}, fmt.Errorf("cloudstore: create first admin human user: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return HumanUser{}, fmt.Errorf("cloudstore: commit first admin: %w", err)
 	}
 	human.DisplayName = principal.DisplayName
 	human.Role = principal.Role

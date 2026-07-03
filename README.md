@@ -206,6 +206,8 @@ engram cloud upgrade status --project smoke-project        # stage/class/reason
 
 See [DOCS.md — Cloud upgrade flow](DOCS.md#cloud-upgrade-flow) for the full state machine.
 
+`engram cloud bootstrap admin` creates the first managed admin (with optional project grants and a one-time issued token) directly in the cloud database. See [DOCS.md — Managed users, tokens, and CLI bootstrap](DOCS.md#managed-users-tokens-and-cli-bootstrap-preview) — this includes an important note that server-side managed-token authentication is not wired into `engram cloud serve` yet, so `ENGRAM_CLOUD_TOKEN`/`ENGRAM_CLOUD_ADMIN` remain the supported auth path for this release.
+
 For authenticated mode, upgrade flow, dashboard behavior, reason codes, and full runtime/env details:
 
 - [Engram Cloud docs landing](docs/engram-cloud/README.md)
@@ -374,6 +376,7 @@ Full CLI with all flags → [docs/ARCHITECTURE.md#cli-reference](docs/ARCHITECTU
 | `ENGRAM_TIMEZONE`               | Timezone for timestamp display in TUI and cloud dashboard (e.g. `America/New_York`). Falls back to system local when unset or invalid. | system local |
 | `ENGRAM_CLOUD_AUTOSYNC`         | Set to `1` to enable background autosync (also requires `ENGRAM_CLOUD_TOKEN` + `ENGRAM_CLOUD_SERVER`).                 | (unset)        |
 | `ENGRAM_CLOUD_ALLOWED_PROJECTS` | Comma-separated project allowlist for `engram cloud serve`. Use `*` to allow all projects.                             | (unset)        |
+| `ENGRAM_CLOUD_TOKEN_PEPPER`     | Dedicated secret used to hash managed tokens issued by `engram cloud bootstrap admin --issue-token`. Required only for token issuance; must differ from `ENGRAM_JWT_SECRET`. | (unset)        |
 
 Full environment variable reference → [DOCS.md#environment-variables](DOCS.md#environment-variables)
 
