@@ -2,15 +2,15 @@
 
 ## Current branch
 
-`feat/cloud-user-token-management-storage-auth`
+`feat/cloud-user-token-management-server-sync`
 
 ## Chain context
 
 - Tracker branch: `feat/cloud-user-token-management`
 - Chain strategy: `feature-branch-chain`
-- Current slice: PR 1B — `internal/cloud/cloudstore` storage/cloudstore foundation
+- Current slice: PR 2 — server middleware and sync grant enforcement
 - Prior slice on this branch: PR 1A — `internal/cloud/auth` principal and token foundation, committed as `d4c3b38 feat(cloud): add auth principal foundation`
-- Out of scope for this slice: cloudserver, dashboard, CLI bootstrap, docs beyond this progress file and task checkboxes
+- Out of scope for this slice: dashboard admin/user-management, CLI bootstrap, docs beyond this progress file and task checkboxes
 
 ## Structured status consumed / produced before apply
 
@@ -93,6 +93,52 @@ isNonAuthoritative: false
 - Kept the slice storage-only: no cloudserver, dashboard, CLI bootstrap, docs, or legacy env-token behavior changes.
 - Removed the local `.codegraph/` index generated during structural inspection so no generated/local files remain.
 - Updated persisted `tasks.md` checkboxes for completed PR 1 / PR1B tasks.
+
+
+### Completed in PR 2 server middleware and sync grant enforcement
+
+- Added `internal/cloud/cloudserver/principal_auth_test.go` covering:
+  - existing `/sync/*` routes accepting valid legacy/principal-resolved tokens;
+  - malformed, unknown, and revoked managed-token requests returning the existing `unauthorized:` 401 style;
+  - principal propagation into request context;
+  - legacy `auth.Service` resolving `ENGRAM_CLOUD_TOKEN` as a legacy sync principal;
+  - managed principal grant enforcement for chunk pull and chunk push;
+  - managed mutation push rejecting mixed granted/ungranted batches all-or-nothing;
+  - managed mutation pull returning only granted project mutations.
+- Updated `internal/cloud/auth/auth.go` so the existing legacy service implements `ResolveBearerToken`, allowing cloudserver to use one principal-aware path while preserving `Authorize` compatibility.
+- Updated `internal/cloud/cloudserver/cloudserver.go` with:
+  - principal resolver detection;
+  - principal request-context helpers;
+  - `WithPrincipalProjectAuthorizer` for managed principal project grants;
+  - shared auth middleware that resolves principals when available and falls back to existing `Authorize` behavior;
+  - principal-aware project authorization for chunk manifest/pull/push routes.
+- Updated `internal/cloud/cloudserver/mutations.go` to use principal-aware project grants for mutation push and mutation pull filtering, while preserving legacy project authorizer behavior.
+- Kept this slice server/sync-only: no dashboard admin, CLI bootstrap, or managed-user UI routes.
+
+### PR 2 validation
+
+```bash
+go test ./internal/cloud/cloudserver
+go test ./...
+```
+
+Results:
+
+- `go test ./internal/cloud/cloudserver`: PASS.
+- `go test ./...`: PASS.
+
+### PR 2 review remediation
+
+- Principal project authorization now fails closed when `WithPrincipalProjectAuthorizer` is configured but no principal is present in request context.
+- Mutation pull now returns a policy error instead of using an unfiltered `nil` project list when a principal authorizer is configured without a resolved principal.
+- Managed principals with no grants now get an explicit empty project filter for mutation pull, preventing nil-as-all leakage.
+- Legacy env sync principals continue to use legacy `ENGRAM_CLOUD_ALLOWED_PROJECTS` semantics even when a principal project authorizer is configured for managed principals.
+- Added fail-closed regression coverage for miswired principal project authorization.
+- Added explicit managed granted chunk push and granted/denied chunk pull route coverage.
+
+### PR 2 note
+
+The first broad PR2 subagent timed out after writing a small, reviewable diff. The parent recovered the partial work, ran `gofmt`, targeted cloudserver tests, and the full test suite. Review still required before commit.
 
 ## Persisted task checkbox updates
 

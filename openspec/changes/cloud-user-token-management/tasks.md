@@ -39,14 +39,14 @@ Risks and dependencies:
 
 ### PR 2 — Server middleware and sync grant enforcement
 
-- [ ] RED: Add handler tests in `internal/cloud/cloudserver/` proving existing `/sync/*` routes still accept valid legacy tokens and reject invalid/malformed/revoked managed tokens with current auth error style.
-- [ ] GREEN: Replace `withAuth` internals in `internal/cloud/cloudserver/cloudserver.go` with principal resolution, request context helpers, and compatibility adapters for existing auth callers.
-- [ ] RED: Add push/pull authorization tests for managed principals: granted project succeeds, ungranted project returns `403`, mutation batch with any ungranted project rejects all-or-nothing, mutation pull leaks no ungranted projects.
-- [ ] GREEN: Wire principal-aware project authorization through sync chunk and mutation handlers, including `internal/cloud/cloudserver/mutations.go`, while preserving legacy `ENGRAM_CLOUD_ALLOWED_PROJECTS` wildcard/list/empty semantics.
-- [ ] TRIANGULATE: Add regression tests for legacy sync principal behavior under `ENGRAM_CLOUD_ALLOWED_PROJECTS=*`, explicit lists, normalized projects, and empty/missing allowlist.
-- [ ] REFACTOR: Keep sync payload structs and route registration unchanged; auth changes must be internal only.
-- [ ] Verify: targeted cloudserver sync tests and `go test ./...`.
-- [ ] Rollback boundary: disable managed-token resolver wiring and retain legacy env-token authorization path.
+- [x] RED: Add handler tests in `internal/cloud/cloudserver/` proving existing `/sync/*` routes still accept valid legacy tokens and reject invalid/malformed/revoked managed tokens with current auth error style.
+- [x] GREEN: Replace `withAuth` internals in `internal/cloud/cloudserver/cloudserver.go` with principal resolution, request context helpers, and compatibility adapters for existing auth callers.
+- [x] RED: Add push/pull authorization tests for managed principals: granted project succeeds, ungranted project returns `403`, mutation batch with any ungranted project rejects all-or-nothing, mutation pull leaks no ungranted projects.
+- [x] GREEN: Wire principal-aware project authorization through sync chunk and mutation handlers, including `internal/cloud/cloudserver/mutations.go`, while preserving legacy `ENGRAM_CLOUD_ALLOWED_PROJECTS` wildcard/list/empty semantics.
+- [x] TRIANGULATE: Add regression tests for legacy sync principal behavior under `ENGRAM_CLOUD_ALLOWED_PROJECTS=*`, explicit lists, normalized projects, and empty/missing allowlist.
+- [x] REFACTOR: Keep sync payload structs and route registration unchanged; auth changes must be internal only.
+- [x] Verify: targeted cloudserver sync tests and `go test ./...`.
+- [x] Rollback boundary: disable managed-token resolver wiring and retain legacy env-token authorization path.
 
 ### PR 3 — Bootstrap, admin authorization, and audit-backed admin operations
 
