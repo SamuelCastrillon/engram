@@ -56,10 +56,10 @@ Risks and dependencies:
 - [x] GREEN: Update dashboard auth/session handling in `internal/cloud/cloudserver` and `internal/cloud/dashboard` so signed cookies carry principal claims but every protected request revalidates enabled state and role from storage.
 - [x] RED: Add bootstrap tests for legacy dashboard/admin credential creating the first managed admin, rejecting duplicate first-admin bootstrap, and preventing accidental removal of the last usable managed admin path.
 - [x] GREEN: Implement dashboard bootstrap route/handler and last-admin protections, treating `ENGRAM_CLOUD_ADMIN` as explicit bootstrap/recovery access after managed admins exist.
-- [ ] RED: Add audit tests for token create/revoke, user create/enable/disable, grant create/revoke, admin login, dashboard bootstrap, accepted/rejected legacy recovery actions, and redaction of raw tokens.
-- [ ] GREEN: Emit synchronous `cloud_auth_audit_log` events for admin/security mutations; fail authoritative admin mutations if audit insertion fails.
-- [ ] Verify: targeted admin/dashboard/bootstrap tests and `go test ./...`.
-- [ ] Rollback boundary: remove admin/bootstrap routes while retaining storage/auth foundation and legacy auth behavior.
+- [x] RED: Add audit tests for token create/revoke, user create/enable/disable, grant create/revoke, admin login, dashboard bootstrap, accepted/rejected legacy recovery actions, and redaction of raw tokens.
+- [x] GREEN: Emit synchronous `cloud_auth_audit_log` events for admin/security mutations; fail authoritative admin mutations if audit insertion fails.
+- [x] Verify: targeted admin/dashboard/bootstrap tests and `go test ./...`.
+- [x] Rollback boundary: remove admin/bootstrap routes while retaining storage/auth foundation and legacy auth behavior.
 
 ### PR 4 — Dashboard managed-user UX
 

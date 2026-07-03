@@ -147,9 +147,15 @@ func (s *adminTestStore) RevokeProjectGrant(_ context.Context, principalID, proj
 	return nil
 }
 
+// InsertAuthAuditEvent replicates the real cloudstore.InsertAuthAuditEvent
+// validation (actor source is required) so tests catch call sites that would
+// silently fail to persist an audit event against the production store.
 func (s *adminTestStore) InsertAuthAuditEvent(_ context.Context, event cloudstore.AuthAuditEvent) error {
 	if s.auditErr != nil {
 		return s.auditErr
+	}
+	if strings.TrimSpace(event.ActorSource) == "" {
+		return errors.New("actor source is required")
 	}
 	s.auditEvents = append(s.auditEvents, event)
 	return nil
