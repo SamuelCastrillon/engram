@@ -3,9 +3,11 @@ package cloudserver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	cloudauth "github.com/Gentleman-Programming/engram/internal/cloud/auth"
@@ -42,6 +44,39 @@ type loginAuditTestStore struct {
 	principals        map[string]cloudstore.Principal
 	hasActiveAdmin    bool
 	hasActiveAdminErr error
+
+	// createFirstAdminMu guards CreateFirstAdminHumanUser's check-then-create
+	// critical section, mirroring the real cloudstore advisory-lock-for-the-
+	// whole-transaction contract (see cloudstore.CreateFirstAdminHumanUser).
+	createFirstAdminMu    sync.Mutex
+	createFirstAdminCalls int
+}
+
+// CreateFirstAdminHumanUser mirrors cloudstore.CreateFirstAdminHumanUser's
+// atomic check-then-create contract for dashboard bootstrap tests: see
+// handleDashboardBootstrapSubmit, which MUST call this instead of a separate
+// HasActiveAdmin-then-CreateHumanUser sequence.
+func (s *loginAuditTestStore) CreateFirstAdminHumanUser(ctx context.Context, params cloudstore.CreateHumanUserParams) (cloudstore.HumanUser, error) {
+	s.createFirstAdminMu.Lock()
+	defer s.createFirstAdminMu.Unlock()
+	s.createFirstAdminCalls++
+	if s.hasActiveAdminErr != nil {
+		return cloudstore.HumanUser{}, s.hasActiveAdminErr
+	}
+	if s.hasActiveAdmin {
+		return cloudstore.HumanUser{}, cloudstore.ErrAdminAlreadyExists
+	}
+	user, err := s.CreateHumanUser(ctx, cloudstore.CreateHumanUserParams{
+		Username:    params.Username,
+		Email:       params.Email,
+		DisplayName: params.DisplayName,
+		Role:        cloudstore.PrincipalRoleAdmin,
+	})
+	if err != nil {
+		return cloudstore.HumanUser{}, err
+	}
+	s.hasActiveAdmin = true
+	return user, nil
 }
 
 func newLoginAuditTestStore() *loginAuditTestStore {
@@ -219,6 +254,20 @@ func TestDashboardLegacyAdminLoginAuditsRecoveryAfterManagedAdminExists(t *testi
 	if event.ActorSource != string(cloudauth.PrincipalSourceLegacyEnvAdmin) {
 		t.Fatalf("expected legacy admin actor source, got %+v", event)
 	}
+	// The legacy admin principal's ID ("legacy:admin") is a synthetic
+	// sentinel, not a real cloud_principals row. cloudstore's real
+	// InsertAuthAuditEvent stores ActorPrincipalID as a nullable
+	// BIGINT REFERENCES cloud_principals(id); this fake store does not
+	// enforce that type, so it would silently accept "legacy:admin" even
+	// though the real database rejects it outright. Once
+	// WithAdminIdentityStore is wired into a running server (the runtime
+	// managed-token wiring slice), that real-database rejection turned every
+	// legacy admin dashboard login into a 500 ("unable to create dashboard
+	// session") — recordDashboardLoginAudit fails closed. This assertion
+	// pins the fix (auditActorPrincipalIDRef) at the real call site.
+	if event.ActorPrincipalID != "" {
+		t.Fatalf("expected legacy admin actor principal ID to be empty (not a real cloud_principals row), got %+v", event)
+	}
 	if recovery, ok := event.Metadata["recovery"].(bool); !ok || !recovery {
 		t.Fatalf("expected legacy admin login after managed admin exists to be tagged as recovery, got %+v", event.Metadata)
 	}
@@ -293,7 +342,80 @@ func TestDashboardBootstrapAuditsAcceptedFirstAdminCreation(t *testing.T) {
 	if event.ActorSource != string(cloudauth.PrincipalSourceLegacyEnvAdmin) {
 		t.Fatalf("expected bootstrap actor source to be legacy admin, got %+v", event)
 	}
+	// See the identical assertion/comment in
+	// TestDashboardLegacyAdminLoginAuditsRecoveryAfterManagedAdminExists:
+	// the legacy admin's synthetic ID must never be sent as
+	// ActorPrincipalID, or the real cloudstore.InsertAuthAuditEvent rejects
+	// the insert (invalid bigint literal) once an admin identity store is
+	// actually wired into a running server.
+	if event.ActorPrincipalID != "" {
+		t.Fatalf("expected legacy admin bootstrap actor principal ID to be empty (not a real cloud_principals row), got %+v", event)
+	}
 	assertNoSensitiveAuditMetadata(t, event)
+}
+
+// TestDashboardBootstrapSubmitConcurrentRequestsCreateExactlyOneAdmin is the
+// REVIEW REMEDIATION regression test for the dashboard first-admin bootstrap
+// TOCTOU race: two concurrent POST /dashboard/bootstrap requests against the
+// same store must never both create a first admin. It proves
+// handleDashboardBootstrapSubmit goes through the atomic
+// CreateFirstAdminHumanUser path (which serializes concurrent callers, see
+// loginAuditTestStore.CreateFirstAdminHumanUser) rather than a separate
+// HasActiveAdmin-then-CreateHumanUser sequence.
+func TestDashboardBootstrapSubmitConcurrentRequestsCreateExactlyOneAdmin(t *testing.T) {
+	store := newLoginAuditTestStore()
+	srv := New(store, legacyAdminOnlyAuthService(t), 0, WithAdminIdentityStore(store), WithDashboardAdminToken("legacy-admin-token"))
+	cookie := managedDashboardLogin(t, srv, "legacy-admin-token", false)
+	// Pre-warm the lazily-initialized dashboard principal session signing
+	// key single-threaded. dashboardPrincipalSessionKey's lazy
+	// generate-on-first-use is an unrelated, pre-existing concurrency gap
+	// (not one of the confirmed findings this test targets); resolving it
+	// here keeps this test focused on the first-admin bootstrap TOCTOU fix.
+	if _, err := srv.dashboardPrincipalSessionKey(); err != nil {
+		t.Fatalf("pre-warm dashboard session key: %v", err)
+	}
+
+	const attempts = 5
+	codes := make(chan int, attempts)
+	var wg sync.WaitGroup
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/dashboard/bootstrap", strings.NewReader(fmt.Sprintf("username=racer-%d", i)))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.AddCookie(cookie)
+			srv.Handler().ServeHTTP(rec, req)
+			codes <- rec.Code
+		}(i)
+	}
+	wg.Wait()
+	close(codes)
+
+	var redirects, conflicts int
+	for code := range codes {
+		switch code {
+		case http.StatusSeeOther:
+			redirects++
+		case http.StatusConflict:
+			conflicts++
+		default:
+			t.Fatalf("unexpected status code from concurrent dashboard bootstrap: %d", code)
+		}
+	}
+	if redirects != 1 {
+		t.Fatalf("expected exactly one concurrent dashboard bootstrap request to succeed, got %d redirects and %d conflicts", redirects, conflicts)
+	}
+	if conflicts != attempts-1 {
+		t.Fatalf("expected the other %d requests to be refused as duplicates, got %d", attempts-1, conflicts)
+	}
+	if store.createUserCalls != 1 {
+		t.Fatalf("expected exactly 1 admin user created despite %d concurrent bootstrap requests, got %d", attempts, store.createUserCalls)
+	}
+	if store.createFirstAdminCalls != attempts {
+		t.Fatalf("expected all %d concurrent requests to go through the atomic CreateFirstAdminHumanUser path, got %d calls", attempts, store.createFirstAdminCalls)
+	}
 }
 
 // TestDashboardMemberLoginIsAuditedUnderRoleNeutralDashboardLoginAction pins

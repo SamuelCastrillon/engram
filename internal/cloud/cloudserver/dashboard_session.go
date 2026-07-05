@@ -49,6 +49,14 @@ type dashboardPrincipalStore interface {
 	principalStateStore
 	HasActiveAdmin(ctx context.Context) (bool, error)
 	CreateHumanUser(ctx context.Context, params cloudstore.CreateHumanUserParams) (cloudstore.HumanUser, error)
+	// CreateFirstAdminHumanUser MUST be used (instead of a separate
+	// HasActiveAdmin-then-CreateHumanUser sequence) for first-admin
+	// dashboard bootstrap: see handleDashboardBootstrapSubmit. Doing the
+	// check and the create as two separate calls reintroduces a
+	// check-then-act (TOCTOU) race where two concurrent bootstrap attempts
+	// (dashboard and/or CLI) could both observe "no active admin" and both
+	// create a first admin.
+	CreateFirstAdminHumanUser(ctx context.Context, params cloudstore.CreateHumanUserParams) (cloudstore.HumanUser, error)
 	InsertAuthAuditEvent(ctx context.Context, event cloudstore.AuthAuditEvent) error
 }
 
@@ -179,7 +187,7 @@ func (s *CloudServer) recordDashboardLoginAudit(ctx context.Context, principal c
 		metadata["recovery"] = true
 	}
 	return store.InsertAuthAuditEvent(ctx, cloudstore.AuthAuditEvent{
-		ActorPrincipalID: strings.TrimSpace(principal.ID),
+		ActorPrincipalID: auditActorPrincipalIDRef(principal),
 		ActorSource:      actorSource,
 		Action:           authAuditActionDashboardLogin,
 		Outcome:          strings.TrimSpace(outcome),
@@ -423,24 +431,26 @@ func (s *CloudServer) handleDashboardBootstrapSubmit(w http.ResponseWriter, r *h
 		http.Error(w, "invalid form", http.StatusBadRequest)
 		return
 	}
-	hasAdmin, err := store.HasActiveAdmin(r.Context())
-	if err != nil {
-		writeActionableError(w, http.StatusInternalServerError, constants.UpgradeErrorClassBlocked, constants.UpgradeErrorCodeInternal, fmt.Sprintf("check active admin: %v", err))
-		return
-	}
-	if hasAdmin {
-		_ = s.recordDashboardBootstrapAudit(r.Context(), store, actor, authAuditOutcomeDenied, "managed_admin_exists", "")
-		writeActionableError(w, http.StatusConflict, constants.UpgradeErrorClassPolicy, constants.ReasonPolicyForbidden, "first managed admin already exists")
-		return
-	}
 	username := strings.TrimSpace(r.FormValue("username"))
 	if username == "" {
 		_ = s.recordDashboardBootstrapAudit(r.Context(), store, actor, authAuditOutcomeDenied, "username_required", "")
 		writeActionableError(w, http.StatusBadRequest, constants.UpgradeErrorClassRepairable, constants.UpgradeErrorCodePayloadInvalid, "username is required")
 		return
 	}
-	user, err := store.CreateHumanUser(r.Context(), cloudstore.CreateHumanUserParams{Username: username, Email: r.FormValue("email"), DisplayName: r.FormValue("display_name"), Role: cloudstore.PrincipalRoleAdmin})
+	// Atomic check-and-create: store.CreateFirstAdminHumanUser checks for an
+	// existing active admin and creates the new admin within a single
+	// transaction (see cloudstore.CreateFirstAdminHumanUser), instead of the
+	// old HasActiveAdmin-then-CreateHumanUser sequence, which left a
+	// check-then-act (TOCTOU) window where two concurrent bootstrap attempts
+	// (dashboard and/or CLI) could both observe "no active admin" and both
+	// create a first admin.
+	user, err := store.CreateFirstAdminHumanUser(r.Context(), cloudstore.CreateHumanUserParams{Username: username, Email: r.FormValue("email"), DisplayName: r.FormValue("display_name")})
 	if err != nil {
+		if errors.Is(err, cloudstore.ErrAdminAlreadyExists) {
+			_ = s.recordDashboardBootstrapAudit(r.Context(), store, actor, authAuditOutcomeDenied, "managed_admin_exists", "")
+			writeActionableError(w, http.StatusConflict, constants.UpgradeErrorClassPolicy, constants.ReasonPolicyForbidden, "first managed admin already exists")
+			return
+		}
 		_ = s.recordDashboardBootstrapAudit(r.Context(), store, actor, authAuditOutcomeDenied, "create_admin_failed", "")
 		writeActionableError(w, http.StatusBadRequest, constants.UpgradeErrorClassRepairable, constants.UpgradeErrorCodePayloadInvalid, fmt.Sprintf("create first admin: %v", err))
 		return
@@ -516,7 +526,7 @@ func (s *CloudServer) recordBootstrapAuditBestEffort(ctx context.Context, actor 
 	}
 	actorSource := auditActorSource(actor)
 	if err := s.adminIdentity.InsertAuthAuditEvent(ctx, cloudstore.AuthAuditEvent{
-		ActorPrincipalID:  strings.TrimSpace(actor.ID),
+		ActorPrincipalID:  auditActorPrincipalIDRef(actor),
 		ActorSource:       actorSource,
 		TargetPrincipalID: strings.TrimSpace(targetPrincipalID),
 		Action:            authAuditActionDashboardBootstrap,
@@ -539,7 +549,7 @@ func (s *CloudServer) dashboardBootstrapStore(w http.ResponseWriter) (dashboardP
 
 func (s *CloudServer) recordDashboardBootstrapAudit(ctx context.Context, store dashboardPrincipalStore, actor cloudauth.Principal, outcome, reason, targetPrincipalID string) error {
 	actorSource := auditActorSource(actor)
-	return store.InsertAuthAuditEvent(ctx, cloudstore.AuthAuditEvent{ActorPrincipalID: strings.TrimSpace(actor.ID), ActorSource: actorSource, TargetPrincipalID: strings.TrimSpace(targetPrincipalID), Action: authAuditActionDashboardBootstrap, Outcome: strings.TrimSpace(outcome), ReasonCode: strings.TrimSpace(reason), Metadata: map[string]any{"source": actorSource}})
+	return store.InsertAuthAuditEvent(ctx, cloudstore.AuthAuditEvent{ActorPrincipalID: auditActorPrincipalIDRef(actor), ActorSource: actorSource, TargetPrincipalID: strings.TrimSpace(targetPrincipalID), Action: authAuditActionDashboardBootstrap, Outcome: strings.TrimSpace(outcome), ReasonCode: strings.TrimSpace(reason), Metadata: map[string]any{"source": actorSource}})
 }
 
 // auditActorSource returns the principal's source string, defaulting to
@@ -552,6 +562,31 @@ func auditActorSource(actor cloudauth.Principal) string {
 		return source
 	}
 	return authAuditActorSourceUnauthenticated
+}
+
+// auditActorPrincipalIDRef returns the principal ID to record as an audit
+// event's ActorPrincipalID, or "" when the principal is not an actual row in
+// cloud_principals. cloud_auth_audit_log.actor_principal_id is a nullable
+// BIGINT REFERENCES cloud_principals(id) (see design.md's persistence
+// design and cloudstore's migration), but legacy/bootstrap/unauthenticated
+// principals are represented by synthetic, non-numeric sentinel IDs (e.g.
+// "legacy:admin", "legacy:sync") that are never persisted as
+// cloud_principals rows. Passing one of those sentinels straight through to
+// cloudstore.InsertAuthAuditEvent's ActorPrincipalID makes Postgres reject
+// the insert outright (invalid bigint literal), which — once
+// WithAdminIdentityStore is actually wired into a running server (this
+// runtime-wiring slice) — turned a successful legacy admin dashboard login
+// into a 500 "unable to create dashboard session" (recordDashboardLoginAudit
+// failing closed). Only cloudauth.PrincipalSourceManagedToken principals
+// resolve to a real cloud_principals row, so only that source's ID is safe
+// to reference here; every other source's actor identity is still fully
+// captured in the audit event's ActorSource/Metadata fields, just not as a
+// foreign-key-checked column.
+func auditActorPrincipalIDRef(actor cloudauth.Principal) string {
+	if actor.Source != cloudauth.PrincipalSourceManagedToken {
+		return ""
+	}
+	return strings.TrimSpace(actor.ID)
 }
 
 func dashboardLoginPathWithNextLocal(next string) string {
